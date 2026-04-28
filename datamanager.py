@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QAbstractTableModel, QModelIndex, QEvent, pyqtSignal
 from PyQt5.QtGui import QFont
 from dbutils import Database
+from log import log_change
 
 
 class SqlTableDelegate(QStyledItemDelegate):
@@ -58,7 +59,7 @@ class SqlTableDelegate(QStyledItemDelegate):
 
 
 class PandasModel(QAbstractTableModel):
-    def __init__(self, data, headers, table_name, db, unique_columns=None, change_callback=None):
+    def __init__(self, data, headers, table_name, db, unique_columns=None, change_callback=None, log_callback=None):
         super().__init__()
         self._data = data
         self._headers = headers
@@ -66,6 +67,7 @@ class PandasModel(QAbstractTableModel):
         self.db = db
         self.unique_columns = unique_columns or set()
         self.change_callback = change_callback
+        self.log_callback = log_callback
 
     def rowCount(self, parent=QModelIndex()):
         return len(self._data)
@@ -111,6 +113,8 @@ class PandasModel(QAbstractTableModel):
                 for row in self._data:
                     if old_name in row:
                         row[new_name] = row.pop(old_name)
+                if callable(self.log_callback):
+                    self.log_callback(f'数据表列名修改 - {self.table_name}.{old_name}', old_name, new_name)
                 self.headerDataChanged.emit(orientation, section, section)
                 if callable(self.change_callback):
                     self.change_callback()
@@ -129,6 +133,7 @@ class PandasModel(QAbstractTableModel):
         if role == Qt.EditRole:
             row = self._data[index.row()]
             col = self._headers[index.column()]
+            old_value = row.get(col)
             new_value = value if value != "" else None
             row[col] = new_value
             try:
@@ -136,6 +141,8 @@ class PandasModel(QAbstractTableModel):
                 if record_id is not None:
                     sql = f'UPDATE "{self.table_name}" SET "{col}" = ? WHERE id = ?'
                     self.db.execute(sql, (new_value, record_id))
+                if callable(self.log_callback) and old_value != new_value:
+                    self.log_callback(f'数据修改 - {self.table_name}[id={record_id}].{col}', old_value, new_value)
             except Exception as e:
                 QMessageBox.critical(None, "错误", f"更新数据库失败：{str(e)}")
                 return False
@@ -176,6 +183,9 @@ class DataManagerWindow(QMainWindow):
 
     def _notify_data_changed(self):
         self.data_changed.emit()
+
+    def _log_change(self, title, before=None, after=None, extra=None):
+        log_change(title, before=before, after=after, extra=extra)
 
     def _read_csv_rows_with_fallback(self, path):
         encodings = ['utf-8-sig', 'utf-8', 'utf-16', 'utf-16-le', 'utf-16-be', 'gb18030', 'gbk', 'cp936', 'big5', 'cp1252', 'latin1']
@@ -384,7 +394,7 @@ class DataManagerWindow(QMainWindow):
                 headers = list(rows[0].keys())
             all_unique = self._get_unique_columns(self.current_table)
             business_unique = {col for col in all_unique if col != 'id'}
-            self.model = PandasModel(rows, headers, self.current_table, self.db, business_unique, self._notify_data_changed)
+            self.model = PandasModel(rows, headers, self.current_table, self.db, business_unique, self._notify_data_changed, self._log_change)
             self.table_view.setModel(self.model)
             self.table_view.resizeRowsToContents()
         except Exception as e:
@@ -440,6 +450,7 @@ class DataManagerWindow(QMainWindow):
             self.db.execute(sql, tuple(values))
             self.load_table_data()
             self._notify_data_changed()
+            self._log_change(f'新增行 - {self.current_table}', before=None, after=dict(zip(columns, values)))
         except Exception as e:
             QMessageBox.critical(self, "错误", f"新增失败：{str(e)}")
 
@@ -465,7 +476,13 @@ class DataManagerWindow(QMainWindow):
                 return
 
             ids_to_delete = []
+            deleted_rows = []
             for row in rows:
+                row_data = {}
+                for col_idx, header in enumerate(model._headers):
+                    row_data[header] = model.data(model.index(row, col_idx))
+                if row_data:
+                    deleted_rows.append(row_data)
                 id_val = model.data(model.index(row, 0))
                 if id_val:
                     ids_to_delete.append(int(id_val))
@@ -490,6 +507,8 @@ class DataManagerWindow(QMainWindow):
 
             self.load_table_data()
             self._notify_data_changed()
+            if deleted_rows:
+                self._log_change(f'删除行 - {self.current_table}', before=deleted_rows, after=None)
         except Exception as e:
             QMessageBox.critical(self, "错误", f"删除失败：{str(e)}")
 
@@ -508,6 +527,7 @@ class DataManagerWindow(QMainWindow):
             self.db.execute(f'ALTER TABLE "{self.current_table}" ADD COLUMN "{col_name}" TEXT')
             self.load_table_data()
             self._notify_data_changed()
+            self._log_change(f'新增列 - {self.current_table}', before=None, after=col_name)
         except Exception as e:
             QMessageBox.critical(self, "错误", f"新增列失败：{str(e)}")
 
@@ -558,6 +578,7 @@ class DataManagerWindow(QMainWindow):
 
             self.load_table_data()
             self._notify_data_changed()
+            self._log_change(f'删除列 - {self.current_table}', before=col_name, after=None)
         except Exception as e:
             QMessageBox.critical(self, "错误", f"删除列失败：{str(e)}")
 
@@ -588,6 +609,7 @@ class DataManagerWindow(QMainWindow):
 
     def _swap_columns(self, col1, col2):
         """交换两列位置并更新数据库表结构"""
+        old_headers = self.model._headers[:]
         headers = self.model._headers[:]
         headers[col1], headers[col2] = headers[col2], headers[col1]
 
@@ -624,6 +646,7 @@ class DataManagerWindow(QMainWindow):
             # 移动后选中交换后的列
             self.table_view.selectColumn(col2)
             self._notify_data_changed()
+            self._log_change(f'列顺序调整 - {self.current_table}', before=old_headers, after=headers)
         except Exception as e:
             QMessageBox.critical(self, "错误", f"移动列失败：{str(e)}")
 
@@ -709,6 +732,7 @@ class DataManagerWindow(QMainWindow):
 
                 self.refresh_table_list()
                 self._notify_data_changed()
+                self._log_change(f'新建表 - {table_name}', before=None, after=columns_def)
                 QMessageBox.information(self, "成功", f"表 '{table_name}' 创建成功")
             except Exception as e:
                 QMessageBox.critical(self, "错误", f"创建表失败：{str(e)}")
@@ -720,12 +744,14 @@ class DataManagerWindow(QMainWindow):
         new_name, ok = QInputDialog.getText(self, "重命名表", "请输入新表名:", text=self.current_table)
         if ok and new_name.strip() and new_name != self.current_table:
             new_name = new_name.strip()
+            table_name_before = self.current_table
             try:
                 self.db.execute(f'ALTER TABLE "{self.current_table}" RENAME TO "{new_name}"')
                 self.current_table = new_name
                 self.refresh_table_list()
                 self.table_combo.setCurrentText(new_name)
                 self._notify_data_changed()
+                self._log_change('数据表重命名', before=table_name_before, after=new_name)
                 QMessageBox.information(self, "成功", f"表已重命名为 '{new_name}'")
             except Exception as e:
                 QMessageBox.critical(self, "错误", f"重命名失败：{str(e)}")
@@ -740,10 +766,12 @@ class DataManagerWindow(QMainWindow):
         if reply == QMessageBox.Yes:
             try:
                 self.db.execute(f'DROP TABLE "{self.current_table}"')
+                dropped_table = self.current_table
                 self.current_table = None
                 self.refresh_table_list()
                 self.load_table_data()
                 self._notify_data_changed()
+                self._log_change('删除数据表', before=dropped_table, after=None)
                 QMessageBox.information(self, "成功", "表已删除")
             except Exception as e:
                 QMessageBox.critical(self, "错误", f"删除表失败：{str(e)}")
@@ -845,6 +873,7 @@ class DataManagerWindow(QMainWindow):
                 self.db.commit_transaction()
                 self.load_table_data()
                 self._notify_data_changed()
+                self._log_change(f'CSV导入覆盖 - {self.current_table}', before=f'原表数据已清空', after={'写入行数': len(insert_data), '编码': used_encoding, '跳过全空行': skipped_empty, '跳过非空约束行': skipped_not_null})
                 QMessageBox.information(self, "完成",
                     f"导入成功！\n已清空原有数据，写入 {len(insert_data)} 行新数据。\n"
                     f"（跳过全空行 {skipped_empty} 行，违反非空约束 {skipped_not_null} 行）")

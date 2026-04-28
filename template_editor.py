@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import (
 )
 from template_db import TemplateDB
 from dbutils import Database
+from log import log_change
 
 
 class FieldEditDialog(QDialog):
@@ -112,7 +113,7 @@ class TemplateEditorWindow(QMainWindow):
         r_inner = QVBoxLayout(right_group)
         self.selected_list = QListWidget()
         self.selected_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.selected_list.currentItemChanged.connect(self.update_condition_summary)
+        self.available_list.currentItemChanged.connect(self.update_condition_summary)
         r_inner.addWidget(self.selected_list)
         cond_btn_layout = QHBoxLayout()
         self.set_cond_btn = QPushButton("显示条件")
@@ -159,8 +160,8 @@ class TemplateEditorWindow(QMainWindow):
         bottom.addWidget(self.save_btn)
         main_layout.addLayout(bottom)
 
-    def _selected_field_name(self):
-        item = self.selected_list.currentItem()
+    def _condition_field_name(self):
+        item = self.available_list.currentItem()
         return item.text().strip() if item else ''
 
     def _computed_preview_text(self):
@@ -173,7 +174,7 @@ class TemplateEditorWindow(QMainWindow):
         self.preview_text.blockSignals(old)
 
     def update_condition_summary(self, *args):
-        name = self._selected_field_name()
+        name = self._condition_field_name()
         if not name:
             self.condition_hint_label.setText("当前字段条件：无")
             return
@@ -181,13 +182,13 @@ class TemplateEditorWindow(QMainWindow):
         self.condition_hint_label.setText(f"当前字段条件：{expr or '无'}")
 
     def edit_selected_field_condition(self):
-        name = self._selected_field_name()
+        name = self._condition_field_name()
         if not name:
-            QMessageBox.information(self, "提示", "请先在已选字段中选择一个字段。")
+            QMessageBox.information(self, "提示", "请先在可用字段中选择一个字段。")
             return
         current = self.field_conditions.get(name, '')
         prompt = (
-            f"为字段“{name}”设置显示条件。\n"
+            f"为可用字段“{name}”设置显示条件。\n"
             "留空表示始终显示。\n"
             "示例：\n"
             "{是否二段硫化} == '是'\n"
@@ -205,7 +206,7 @@ class TemplateEditorWindow(QMainWindow):
             self._emit_live_content_changed()
 
     def clear_selected_field_condition(self):
-        name = self._selected_field_name()
+        name = self._condition_field_name()
         if not name:
             return
         self.field_conditions.pop(name, None)
@@ -366,9 +367,12 @@ class TemplateEditorWindow(QMainWindow):
 
     def save_template(self):
         content = self.get_current_content()
+        before = self.original_content
         self.template_db.update_process_template(self.template_name, content)
         self.original_content = content
         self._emit_live_content_changed()
+        if before != content:
+            log_change(f'字段模板修改 - {self.template_name}', before=before, after=content)
         QMessageBox.information(self, "成功", "模板已保存")
 
     def closeEvent(self, event):

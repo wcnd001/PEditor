@@ -18,8 +18,9 @@ from datamatch import DataMatcher, RuleManagerDialog
 import export
 from webcontrol import BrowserFlowWindow
 from utils import resource_path
+from log import LogViewerDialog, log_change
 
-__version__ = '2.6'
+__version__ = '2.7'
 # 打包命令：pyinstaller --clean PEditor.spec --distpath "D:\Microsoft Visual Studio\code"
 
 
@@ -295,6 +296,8 @@ class PEditor(QMainWindow):
         self.copy_buttons = []
         self.copy_button_group = QButtonGroup(self)
         self.copy_button_group.setExclusive(False)
+        self._copy_selected_fields = []
+        self._copy_last_selected_field = ''
         self.data_manager_window = None
         self.template_editor_window = None
         self.browser_flow_window = None
@@ -496,6 +499,7 @@ class PEditor(QMainWindow):
             ('数据库', self.open_data_manager),
             ('设置', self.open_settings),
             ('教程', self.open_tutorial),
+            ('日志', self.open_log_viewer),
         ]:
             btn = QPushButton(text)
             btn.clicked.connect(handler)
@@ -524,6 +528,8 @@ class PEditor(QMainWindow):
                 self.settings_btn = btn
             elif text == '教程':
                 self.tutorial_btn = btn
+            elif text == '日志':
+                self.log_btn = btn
         t_layout.addStretch()
         main_layout.addLayout(t_layout)
 
@@ -574,6 +580,12 @@ class PEditor(QMainWindow):
         self.del_copy_btn = QPushButton('删除选中')
         self.del_copy_btn.clicked.connect(self.delete_selected_copy_button)
         copy_toolbar.addWidget(self.del_copy_btn)
+        self.move_copy_left_btn = QPushButton('前移')
+        self.move_copy_left_btn.clicked.connect(lambda: self.move_selected_copy_buttons(-1))
+        copy_toolbar.addWidget(self.move_copy_left_btn)
+        self.move_copy_right_btn = QPushButton('后移')
+        self.move_copy_right_btn.clicked.connect(lambda: self.move_selected_copy_buttons(1))
+        copy_toolbar.addWidget(self.move_copy_right_btn)
         self.copy_multi_check = QCheckBox('多选')
         self.copy_multi_check.toggled.connect(self.on_copy_multi_mode_changed)
         copy_toolbar.addWidget(self.copy_multi_check)
@@ -732,6 +744,20 @@ class PEditor(QMainWindow):
         btn_box.accepted.connect(dlg.accept)
         layout.addWidget(btn_box)
         dlg.exec_()
+
+
+    def open_log_viewer(self):
+        dlg = LogViewerDialog(self)
+        dlg.exec_()
+
+    def _show_browser_alert(self, message, level='info'):
+        text = str(message or '').strip()
+        if not text:
+            return
+        if str(level).lower() in ('warning', 'timeout', 'error'):
+            QMessageBox.warning(self, '浏览器提示', text)
+        else:
+            QMessageBox.information(self, '浏览器提示', text)
 
     def load_template_list(self):
         previous = self.current_template_name
@@ -946,9 +972,17 @@ class PEditor(QMainWindow):
     def _save_current_template(self):
         if not self.current_template_name:
             return
-        config = {'options': self.current_options_config, 'rules': self.current_rules_config, 'copy_buttons': self.get_current_copy_button_fields()}
+        before = self.template_db.get_main_template(self.current_template_name) or {}
+        before_config = (before.get('config', {}) if before else {}) or {}
+        config = {
+            'options': self.current_options_config,
+            'rules': self.current_rules_config,
+            'copy_buttons': self._sanitize_copy_button_fields(self.get_current_copy_button_fields()),
+        }
         self.template_db.update_main_template(self.current_template_name, self.current_template_name, config)
         self._sync_current_template_combo_item(config)
+        if before_config != config:
+            log_change(f'主模板修改 - {self.current_template_name}', before=before_config, after=config)
 
     def refresh_input_area(self, preserved_values=None):
         for w in self.input_widgets:
@@ -1052,10 +1086,66 @@ class PEditor(QMainWindow):
         vbar.setValue(int(round(v_ratio * new_v_max)) if new_v_max else 0)
         hbar.setValue(int(round(h_ratio * new_h_max)) if new_h_max else 0)
 
-    def get_current_copy_button_fields(self):
-        return [field for _, field in self.copy_buttons]
+    def _get_all_process_field_names(self):
+        if not self.current_template_name:
+            return []
+        content = self._get_current_process_content() or {}
+        names = []
+        names.extend(content.get('available_field_names', []) or [])
+        names.extend((content.get('available_fields', {}) or {}).keys())
+        names.extend(content.get('selected_fields', []) or [])
+        result = []
+        seen = set()
+        for name in names:
+            name = str(name).strip()
+            if name and name not in seen:
+                seen.add(name)
+                result.append(name)
+        return result
 
-    def update_copy_buttons_from_config(self):
+    def _get_current_process_content(self):
+        content = self._get_active_process_content_override()
+        if isinstance(content, dict):
+            return content
+        if not self.current_template_name:
+            return {}
+        proc_tpl = self.template_db.get_process_template(self.current_template_name) or {}
+        return (proc_tpl.get('content', {}) or {})
+
+    def _get_visible_copy_button_fields(self):
+        content = self._get_current_process_content() or {}
+        field_conditions = content.get('field_conditions', {}) or {}
+        field_configs = content.get('available_fields', {}) or {}
+        visible = set()
+        input_values = self.collect_input_values() if self.current_template_name else {}
+        data_pool = dict(self._last_data_pool or {})
+        for field in self._get_all_process_field_names():
+            expr = str(field_conditions.get(field, '') or '').strip()
+            if not expr:
+                visible.add(field)
+                continue
+            try:
+                if self.data_matcher._evaluate_condition(expr, data_pool, input_values, field_configs):
+                    visible.add(field)
+            except Exception:
+                visible.add(field)
+        return visible
+
+    def _sanitize_copy_button_fields(self, fields):
+        available = set(self._get_all_process_field_names())
+        result = []
+        seen = set()
+        for field in fields or []:
+            name = str(field or '').strip()
+            if not name or name in seen:
+                continue
+            if available and name not in available:
+                continue
+            seen.add(name)
+            result.append(name)
+        return result
+
+    def _clear_copy_button_widgets(self):
         for btn, _ in self.copy_buttons:
             self.copy_button_group.removeButton(btn)
             btn.deleteLater()
@@ -1065,60 +1155,174 @@ class PEditor(QMainWindow):
             if item.widget():
                 item.widget().deleteLater()
 
+    def _normalize_copy_selected_fields(self, fields=None):
+        ordered = []
+        selected = set(self._sanitize_copy_button_fields(fields if fields is not None else self._copy_selected_fields))
+        for _, field in self.copy_buttons:
+            if field in selected and field not in ordered:
+                ordered.append(field)
+        self._copy_selected_fields = ordered
+        if self._copy_last_selected_field and self._copy_last_selected_field not in {field for _, field in self.copy_buttons}:
+            self._copy_last_selected_field = ''
+        return ordered
+
+    def _checked_copy_field_names(self):
+        result = []
+        for btn, field in self.copy_buttons:
+            if btn.isChecked() and field not in result:
+                result.append(field)
+        return result
+
+    def _selected_copy_field_names_for_action(self):
+        selected = list(self._normalize_copy_selected_fields())
+        if not selected:
+            selected = self._sanitize_copy_button_fields(self._checked_copy_field_names())
+            if selected:
+                self._copy_selected_fields = list(selected)
+        if not selected and (not getattr(self, 'copy_multi_check', None) or not self.copy_multi_check.isChecked()):
+            fallback = self._sanitize_copy_button_fields([self._copy_last_selected_field])
+            if fallback:
+                selected = fallback
+                self._copy_selected_fields = list(fallback)
+        return list(selected)
+
+    def _apply_copy_button_checked_state(self, fields=None):
+        selected = set(self._normalize_copy_selected_fields(fields))
+        for btn, field in self.copy_buttons:
+            old = btn.blockSignals(True)
+            btn.setChecked(field in selected)
+            btn.blockSignals(old)
+
+    def _rebuild_copy_button_widgets(self, fields, checked_fields=None):
+        checked_fields = self._sanitize_copy_button_fields(checked_fields or self._copy_selected_fields)
+        self._clear_copy_button_widgets()
+        for field_name in self._sanitize_copy_button_fields(fields):
+            btn = QPushButton(field_name)
+            btn.setCheckable(True)
+            btn.setMinimumWidth(80)
+            btn.clicked.connect(lambda checked, b=btn, f=field_name: self.on_copy_button_clicked(b, f, checked))
+            self.copy_buttons_layout.addWidget(btn)
+            self.copy_button_group.addButton(btn)
+            self.copy_buttons.append((btn, field_name))
+        self._apply_copy_button_checked_state(checked_fields)
+
+    def get_current_copy_button_fields(self):
+        return self._sanitize_copy_button_fields([field for _, field in self.copy_buttons])
+
+    def update_copy_buttons_from_config(self):
+        previous_selected = list(self._sanitize_copy_button_fields(self._copy_selected_fields))
+        previous_last = self._sanitize_copy_button_fields([self._copy_last_selected_field])
+        self._clear_copy_button_widgets()
+        self._copy_selected_fields = []
+        self._copy_last_selected_field = previous_last[0] if previous_last else ''
         if not self.current_template_name:
             return
-        main_tpl = self.template_db.get_main_template(self.current_template_name)
-        if main_tpl:
-            saved_fields = main_tpl.get('config', {}).get('copy_buttons', [])
-            seen = set()
-            for field in saved_fields:
-                if field not in seen:
-                    seen.add(field)
-                    self._add_copy_button_internal(field)
-        else:
-            proc_tpl = self.template_db.get_process_template(self.current_template_name)
-            if proc_tpl:
-                seen = set()
-                for field in proc_tpl.get('content', {}).get('selected_fields', []):
-                    if field not in seen:
-                        seen.add(field)
-                        self._add_copy_button_internal(field)
+        main_tpl = self.template_db.get_main_template(self.current_template_name) or {}
+        main_cfg = main_tpl.get('config', {}) or {}
+        all_fields = self._get_all_process_field_names()
+        raw_fields = main_cfg.get('copy_buttons', []) or []
+        clean_fields = self._sanitize_copy_button_fields(raw_fields)
+        missing_fields = [field for field in all_fields if field not in clean_fields]
+        display_fields = clean_fields + missing_fields if clean_fields else all_fields
+        restored_selected = self._sanitize_copy_button_fields(previous_selected)
+        self._rebuild_copy_button_widgets(display_fields, checked_fields=restored_selected)
+        saved_fields = self._sanitize_copy_button_fields(display_fields)
+        if self._copy_last_selected_field and self._copy_last_selected_field not in saved_fields:
+            self._copy_last_selected_field = ''
+        if raw_fields != saved_fields and self.current_template_name:
+            clean_config = {
+                'options': self.current_options_config,
+                'rules': self.current_rules_config,
+                'copy_buttons': saved_fields,
+            }
+            self.template_db.update_main_template(self.current_template_name, self.current_template_name, clean_config)
+            self._sync_current_template_combo_item(clean_config)
         self.refresh_copy_button_visibility(self._last_final_fields)
 
     def on_copy_multi_mode_changed(self, checked):
         if not checked:
-            for btn, _ in self.copy_buttons:
-                old = btn.blockSignals(True)
-                btn.setChecked(False)
-                btn.blockSignals(old)
+            fallback = self._sanitize_copy_button_fields([self._copy_last_selected_field])
+            self._copy_selected_fields = fallback
+            self._apply_copy_button_checked_state(fallback)
 
     def on_copy_button_clicked(self, button, field_name, checked=False):
-        if not getattr(self, 'copy_multi_check', None) or not self.copy_multi_check.isChecked():
-            for other, _ in self.copy_buttons:
-                if other is not button and other.isChecked():
-                    old = other.blockSignals(True)
-                    other.setChecked(False)
-                    other.blockSignals(old)
-        self.copy_field_content(field_name)
-        if not getattr(self, 'copy_multi_check', None) or not self.copy_multi_check.isChecked():
-            old = button.blockSignals(True)
-            button.setChecked(False)
-            button.blockSignals(old)
+        field_name = str(field_name or '').strip()
+        if not field_name:
+            return
+        multi_enabled = bool(getattr(self, 'copy_multi_check', None) and self.copy_multi_check.isChecked())
+        if not multi_enabled:
+            if checked:
+                self._copy_selected_fields = [field_name]
+                self._copy_last_selected_field = field_name
+            else:
+                self._copy_selected_fields = []
+                if self._copy_last_selected_field == field_name:
+                    self._copy_last_selected_field = ''
+            self._apply_copy_button_checked_state(self._copy_selected_fields)
+            if checked:
+                self.copy_field_content(field_name)
+            return
 
-    def _add_copy_button_internal(self, field_name):
-        btn = QPushButton(field_name)
-        btn.setCheckable(True)
-        btn.setMinimumWidth(80)
-        btn.clicked.connect(lambda checked, b=btn, f=field_name: self.on_copy_button_clicked(b, f, checked))
-        self.copy_buttons_layout.addWidget(btn)
-        self.copy_button_group.addButton(btn)
-        self.copy_buttons.append((btn, field_name))
+        self._copy_last_selected_field = field_name
+        selected = list(self._selected_copy_field_names_for_action())
+        if checked:
+            if field_name not in selected:
+                selected.append(field_name)
+        else:
+            selected = [field for field in selected if field != field_name]
+        self._copy_selected_fields = selected
+        if selected:
+            self._copy_last_selected_field = selected[-1]
+        else:
+            self._copy_last_selected_field = ''
+        self._apply_copy_button_checked_state(self._copy_selected_fields)
+        if checked:
+            self.copy_field_content(field_name)
+
+    def _selected_copy_field_names(self):
+        return list(self._selected_copy_field_names_for_action())
+
+    def move_selected_copy_buttons(self, delta):
+        selected_fields = self._selected_copy_field_names_for_action()
+        selected = set(selected_fields)
+        if not selected:
+            QMessageBox.information(self, '提示', '请先选中要移动的按钮。')
+            return
+
+        items = list(self.copy_buttons)
+        indexes = [i for i, (_, field) in enumerate(items) if field in selected]
+        if delta < 0:
+            for index in indexes:
+                if index > 0 and items[index - 1][1] not in selected:
+                    items[index - 1], items[index] = items[index], items[index - 1]
+        elif delta > 0:
+            for index in reversed(indexes):
+                if index < len(items) - 1 and items[index + 1][1] not in selected:
+                    items[index + 1], items[index] = items[index], items[index + 1]
+        else:
+            return
+
+        self.copy_buttons = items
+        while self.copy_buttons_layout.count():
+            item = self.copy_buttons_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+        for btn, _ in self.copy_buttons:
+            self.copy_buttons_layout.addWidget(btn)
+
+        self._copy_selected_fields = list(selected_fields)
+        if selected_fields:
+            self._copy_last_selected_field = selected_fields[-1]
+        self._apply_copy_button_checked_state(selected_fields)
+        self.refresh_copy_button_visibility(self._last_final_fields)
+        self._save_current_template()
 
     def refresh_copy_button_visibility(self, final_fields=None):
-        visible_fields = set((final_fields or {}).keys()) if isinstance(final_fields, dict) else set()
-        if not visible_fields and self.current_template_name:
+        visible_fields = self._get_visible_copy_button_fields() if self.current_template_name else set()
+        if not visible_fields:
             for btn, _ in self.copy_buttons:
-                btn.setVisible(True)
+                btn.setVisible(False)
             return
         for btn, field in self.copy_buttons:
             btn.setVisible(field in visible_fields)
@@ -1127,43 +1331,48 @@ class PEditor(QMainWindow):
         if not self.current_template_name:
             QMessageBox.warning(self, '提示', '请先选择模板')
             return
-        proc_tpl = self.template_db.get_process_template(self.current_template_name)
-        if not proc_tpl:
-            QMessageBox.warning(self, '提示', '请先编辑字段模板，定义已选字段')
-            return
-        selected_fields = proc_tpl.get('content', {}).get('selected_fields', [])
-        if not selected_fields:
-            QMessageBox.warning(self, '提示', '已选字段列表为空')
+        all_fields = self._get_all_process_field_names()
+        if not all_fields:
+            QMessageBox.warning(self, '提示', '请先编辑字段模板，定义字段')
             return
         menu = QMenu(self)
-        for field in list(dict.fromkeys(selected_fields)):
+        for field in all_fields:
             action = QAction(field, self)
             action.triggered.connect(lambda checked, f=field: self.add_copy_button_by_field(f))
             menu.addAction(action)
         menu.exec_(self.add_copy_btn.mapToGlobal(self.add_copy_btn.rect().bottomLeft()))
 
     def add_copy_button_by_field(self, field_name):
+        field_name = str(field_name or '').strip()
+        if not field_name:
+            return
+        all_fields = set(self._get_all_process_field_names())
+        if all_fields and field_name not in all_fields:
+            QMessageBox.warning(self, '提示', f'字段“{field_name}”不存在，无法添加。')
+            return
         for _, existing in self.copy_buttons:
             if existing == field_name:
                 QMessageBox.information(self, '提示', f'按钮“{field_name}”已存在')
                 return
-        self._add_copy_button_internal(field_name)
+        selected = self._selected_copy_field_names()
+        self._rebuild_copy_button_widgets(self.get_current_copy_button_fields() + [field_name], checked_fields=selected)
+        self.refresh_copy_button_visibility(self._last_final_fields)
         self._save_current_template()
 
     def delete_selected_copy_button(self):
-        to_remove = []
-        for btn, field in self.copy_buttons:
-            if btn.isChecked():
-                self.copy_button_group.removeButton(btn)
-                btn.deleteLater()
-                to_remove.append((btn, field))
-        if not to_remove:
+        selected_fields = self._selected_copy_field_names_for_action()
+        selected = set(selected_fields)
+        if not selected:
             QMessageBox.information(self, '提示', '请先选中要删除的按钮（点击按钮使其高亮）')
             return
-        for item in to_remove:
-            self.copy_buttons.remove(item)
+        remain = [field for field in self.get_current_copy_button_fields() if field not in selected]
+        self._copy_selected_fields = [field for field in selected_fields if field not in selected]
+        if self._copy_last_selected_field in selected:
+            self._copy_last_selected_field = self._copy_selected_fields[-1] if self._copy_selected_fields else ''
+        self._rebuild_copy_button_widgets(remain, checked_fields=self._copy_selected_fields)
         if getattr(self, 'copy_multi_check', None) and not self.copy_multi_check.isChecked():
             self.on_copy_multi_mode_changed(False)
+        self.refresh_copy_button_visibility(self._last_final_fields)
         self._save_current_template()
 
     def copy_field_content(self, field_name):
@@ -1171,7 +1380,17 @@ class PEditor(QMainWindow):
             return
         try:
             self.update_result_text(force=True)
-            QApplication.clipboard().setText(str(self._last_final_fields.get(field_name, '')))
+            copy_text = self._last_final_fields.get(field_name, '')
+            if field_name not in self._last_final_fields:
+                content = dict(self._get_current_process_content() or {})
+                content['selected_fields'] = [field_name]
+                _, _, final_fields = self.data_matcher.render(
+                    self.current_template_name,
+                    self.collect_input_values(),
+                    process_content_override=content,
+                )
+                copy_text = final_fields.get(field_name, '')
+            QApplication.clipboard().setText(str(copy_text or ''))
         except Exception as e:
             QMessageBox.critical(self, '错误', f'复制失败：{e}')
 
@@ -1252,6 +1471,7 @@ class PEditor(QMainWindow):
             self._last_input_values,
             data_pool=self._last_data_pool,
             flow_override=flow_override,
+            alert_handler=self._show_browser_alert,
         )
         if success:
             QMessageBox.information(self, '成功', '已执行浏览器导出。\n\n' + (message[-800:] if message else ''))

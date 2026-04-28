@@ -14,7 +14,7 @@ def export_data(data_pool: dict):
     print('=== 导出完成 ===', flush=True)
 
 
-def export_to_browser(template_db, template_name: str, result_text: str, final_fields: dict, input_values: dict = None, data_pool: dict = None, flow_override: dict = None):
+def export_to_browser(template_db, template_name: str, result_text: str, final_fields: dict, input_values: dict = None, data_pool: dict = None, flow_override: dict = None, alert_handler=None):
     flow = flow_override or template_db.get_browser_flow(template_name)
     if not flow:
         return False, '当前模板未配置浏览器流程。'
@@ -35,7 +35,7 @@ def export_to_browser(template_db, template_name: str, result_text: str, final_f
     }
 
     try:
-        _engine.execute_flow(flow, payload, logger=logger)
+        _engine.execute_flow(flow, payload, logger=logger, alert_handler=alert_handler)
         logger('浏览器导出执行完成。')
         return True, '\n'.join(logs)
     except Exception as e:

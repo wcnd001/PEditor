@@ -1,4 +1,5 @@
 import json
+from log import log_change
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QAbstractItemView,
@@ -28,26 +29,46 @@ from PyQt5.QtWidgets import (
 
 ACTION_CLICK = '点击元素'
 ACTION_INPUT = '输入文本'
+ACTION_MULTI_SELECT = '多选元素/多行选择'
+ACTION_RIGHT_CLICK = '右键点击'
+ACTION_KEY_COMBO = '键盘组合键'
+ACTION_RIGHT_CLICK_MENU = '右键菜单项点击'
+ACTION_DROPDOWN_TWO_STAGE = '下拉菜单两段式操作'
 ACTION_WAIT_ELEMENT = '等待元素'
+ACTION_WAIT_ELEMENT_GONE = '等待元素消失'
 ACTION_WAIT_NEW_WINDOW = '等待新窗口'
+ACTION_WAIT_WINDOW_BACK_MAIN = '等待窗口关闭/等待回到主窗口'
 ACTION_SWITCH_WINDOW = '切换窗口'
 ACTION_SWITCH_MAIN_WINDOW = '切回主窗口'
 ACTION_SWITCH_IFRAME = '切换iframe'
 ACTION_SWITCH_DEFAULT = '切回默认文档'
 ACTION_SLEEP = '延时'
 ACTION_DRAG = '拖拽元素'
+ACTION_PAGE_CONDITION = '页面条件判断'
+ACTION_ADD_TABLE = '添加表格'
+ACTION_FILL_TABLE = '自动填单元格'
 
 STEP_ACTIONS = [
     ACTION_CLICK,
     ACTION_INPUT,
+    ACTION_MULTI_SELECT,
+    ACTION_RIGHT_CLICK,
+    ACTION_KEY_COMBO,
+    ACTION_RIGHT_CLICK_MENU,
+    ACTION_DROPDOWN_TWO_STAGE,
     ACTION_WAIT_ELEMENT,
+    ACTION_WAIT_ELEMENT_GONE,
     ACTION_WAIT_NEW_WINDOW,
+    ACTION_WAIT_WINDOW_BACK_MAIN,
     ACTION_SWITCH_WINDOW,
     ACTION_SWITCH_MAIN_WINDOW,
     ACTION_SWITCH_IFRAME,
     ACTION_SWITCH_DEFAULT,
     ACTION_SLEEP,
     ACTION_DRAG,
+    ACTION_PAGE_CONDITION,
+    ACTION_ADD_TABLE,
+    ACTION_FILL_TABLE,
 ]
 
 LOCATOR_TYPES = ['id', 'name', 'xpath', 'css selector', 'class name', 'tag name', 'link text', 'partial link text']
@@ -224,6 +245,10 @@ class BrowserFlowWindow(QMainWindow):
         drag_offset_layout.addStretch()
         self.value_template_edit = QPlainTextEdit()
         self.value_template_edit.setPlaceholderText('可使用 {字段名}、{__RESULT__}、{__NL__} 或 #if(...)#')
+        self.page_condition_expr_edit = QLineEdit()
+        self.page_condition_expr_edit.setPlaceholderText('页面条件判断时可填表达式；留空则按元素定位检测')
+        self.detect_mode_combo = QComboBox()
+        self.detect_mode_combo.addItems(['立即判断', '等待判断'])
         self.wait_timeout_spin = QDoubleSpinBox()
         self.wait_timeout_spin.setRange(0.1, 9999)
         self.wait_timeout_spin.setValue(10)
@@ -255,10 +280,43 @@ class BrowserFlowWindow(QMainWindow):
         self.field_insert_widget = QWidget()
         field_row = QHBoxLayout(self.field_insert_widget)
         field_row.setContentsMargins(0, 0, 0, 0)
-        field_row.addWidget(QLabel('已选字段去重:'))
         field_row.addWidget(self.field_combo, 1)
         field_row.addWidget(self.insert_field_btn)
         field_row.addWidget(self.insert_result_btn)
+
+        self.on_found_step_spin = QSpinBox()
+        self.on_found_step_spin.setRange(0, 9999)
+        self.on_not_found_step_spin = QSpinBox()
+        self.on_not_found_step_spin.setRange(0, 9999)
+        self.on_timeout_step_spin = QSpinBox()
+        self.on_timeout_step_spin.setRange(0, 9999)
+        self.on_found_message_edit = QLineEdit()
+        self.on_not_found_message_edit = QLineEdit()
+        self.on_timeout_message_edit = QLineEdit()
+
+        self.branch_found_widget = QWidget()
+        found_row = QHBoxLayout(self.branch_found_widget)
+        found_row.setContentsMargins(0, 0, 0, 0)
+        found_row.addWidget(QLabel('跳转步骤:'))
+        found_row.addWidget(self.on_found_step_spin)
+        found_row.addWidget(QLabel('提示:'))
+        found_row.addWidget(self.on_found_message_edit, 1)
+
+        self.branch_not_found_widget = QWidget()
+        not_found_row = QHBoxLayout(self.branch_not_found_widget)
+        not_found_row.setContentsMargins(0, 0, 0, 0)
+        not_found_row.addWidget(QLabel('跳转步骤:'))
+        not_found_row.addWidget(self.on_not_found_step_spin)
+        not_found_row.addWidget(QLabel('提示:'))
+        not_found_row.addWidget(self.on_not_found_message_edit, 1)
+
+        self.branch_timeout_widget = QWidget()
+        timeout_row = QHBoxLayout(self.branch_timeout_widget)
+        timeout_row.setContentsMargins(0, 0, 0, 0)
+        timeout_row.addWidget(QLabel('跳转步骤:'))
+        timeout_row.addWidget(self.on_timeout_step_spin)
+        timeout_row.addWidget(QLabel('提示:'))
+        timeout_row.addWidget(self.on_timeout_message_edit, 1)
 
         form.addRow('步骤名称:', self.step_name_edit)
         form.addRow('执行条件:', self.step_condition_edit)
@@ -269,8 +327,13 @@ class BrowserFlowWindow(QMainWindow):
         form.addRow('目标定位值:', self.target_locator_value_edit)
         form.addRow('释放位置:', self.drop_position_combo)
         form.addRow('拖拽偏移:', self.drag_offset_widget)
-        form.addRow('输入模板:', self.value_template_edit)
+        form.addRow('输入/参数模板:', self.value_template_edit)
         form.addRow('字段插入:', self.field_insert_widget)
+        form.addRow('页面判断表达式:', self.page_condition_expr_edit)
+        form.addRow('检测模式:', self.detect_mode_combo)
+        form.addRow('找到分支:', self.branch_found_widget)
+        form.addRow('找不到分支:', self.branch_not_found_widget)
+        form.addRow('超时分支:', self.branch_timeout_widget)
         form.addRow('回车/换行处理:', self.newline_mode_combo)
         form.addRow('Tab/缩进处理:', self.tab_mode_combo)
         form.addRow('空格处理:', self.space_mode_combo)
@@ -513,8 +576,15 @@ class BrowserFlowWindow(QMainWindow):
         try:
             self.apply_current_step_changes(silent=True)
             self.flow_config = self.collect_flow(strict=True)
+            old_flow = None
+            try:
+                old_flow = json.loads(self._loaded_signature) if self._loaded_signature else None
+            except Exception:
+                old_flow = None
             self.template_db.update_browser_flow(self.template_name, self.flow_config)
             self._loaded_signature = self._signature(self.flow_config)
+            if old_flow != self.flow_config:
+                log_change(f'浏览器流程修改 - {self.template_name}', before=old_flow, after=self.flow_config)
             self.log('浏览器流程配置已保存。')
             QMessageBox.information(self, '成功', '浏览器流程配置已保存。')
             return True
@@ -536,36 +606,9 @@ class BrowserFlowWindow(QMainWindow):
         else:
             self.clear_step_editor()
 
-    def clear_step_editor(self):
-        self._loading_step = True
-        self.step_name_edit.clear()
-        self.step_condition_edit.clear()
-        self.action_combo.setCurrentIndex(0)
-        self.locator_type_combo.setCurrentIndex(0)
-        self.locator_value_edit.clear()
-        self.target_locator_type_combo.setCurrentIndex(0)
-        self.target_locator_value_edit.clear()
-        self.drop_position_combo.setCurrentText('中间')
-        self.drag_offset_x_spin.setValue(0)
-        self.drag_offset_y_spin.setValue(0)
-        self.value_template_edit.clear()
-        self.newline_mode_combo.setCurrentText('直接输入')
-        self.tab_mode_combo.setCurrentText('直接输入')
-        self.space_mode_combo.setCurrentText('直接输入')
-        self.wait_timeout_spin.setValue(10)
-        self.window_match_type_combo.setCurrentIndex(0)
-        self.window_match_value_edit.clear()
-        self.sleep_seconds_spin.setValue(1)
-        self.use_js_click_check.setChecked(False)
-        self.clear_before_input_check.setChecked(True)
-        self.wait_clickable_check.setChecked(False)
-        self.note_edit.clear()
-        self._loading_step = False
-        self.update_action_visibility(self.action_combo.currentText())
-
-    def add_step(self):
+    def _new_step(self, **overrides):
         step = {
-            'name': f'步骤{len(self.flow_config.get("steps", [])) + 1}',
+            'name': '',
             'condition_expr': '',
             'action': ACTION_CLICK,
             'locator_type': 'xpath',
@@ -576,6 +619,14 @@ class BrowserFlowWindow(QMainWindow):
             'drag_offset_x': 0,
             'drag_offset_y': 0,
             'value_template': '',
+            'page_condition_expr': '',
+            'detect_mode': '等待判断',
+            'on_found_step': 0,
+            'on_not_found_step': 0,
+            'on_timeout_step': 0,
+            'on_found_message': '',
+            'on_not_found_message': '',
+            'on_timeout_message': '',
             'newline_mode': '直接输入',
             'tab_mode': '直接输入',
             'space_mode': '直接输入',
@@ -588,6 +639,47 @@ class BrowserFlowWindow(QMainWindow):
             'wait_clickable': False,
             'note': '',
         }
+        step.update(overrides)
+        return step
+
+    def clear_step_editor(self):
+        self._loading_step = True
+        step = self._new_step()
+        self.step_name_edit.setText(step.get('name', ''))
+        self.step_condition_edit.setText(step.get('condition_expr', ''))
+        self.action_combo.setCurrentText(step.get('action', ACTION_CLICK))
+        self.locator_type_combo.setCurrentText(step.get('locator_type', 'xpath'))
+        self.locator_value_edit.setText(step.get('locator_value', ''))
+        self.target_locator_type_combo.setCurrentText(step.get('target_locator_type', 'xpath'))
+        self.target_locator_value_edit.setText(step.get('target_locator_value', ''))
+        self.drop_position_combo.setCurrentText(step.get('drop_position', '中间'))
+        self.drag_offset_x_spin.setValue(int(step.get('drag_offset_x', 0) or 0))
+        self.drag_offset_y_spin.setValue(int(step.get('drag_offset_y', 0) or 0))
+        self.value_template_edit.setPlainText(step.get('value_template', ''))
+        self.page_condition_expr_edit.setText(step.get('page_condition_expr', ''))
+        self.detect_mode_combo.setCurrentText(step.get('detect_mode', '等待判断'))
+        self.on_found_step_spin.setValue(int(step.get('on_found_step', 0) or 0))
+        self.on_not_found_step_spin.setValue(int(step.get('on_not_found_step', 0) or 0))
+        self.on_timeout_step_spin.setValue(int(step.get('on_timeout_step', 0) or 0))
+        self.on_found_message_edit.setText(step.get('on_found_message', ''))
+        self.on_not_found_message_edit.setText(step.get('on_not_found_message', ''))
+        self.on_timeout_message_edit.setText(step.get('on_timeout_message', ''))
+        self.newline_mode_combo.setCurrentText(step.get('newline_mode', '直接输入'))
+        self.tab_mode_combo.setCurrentText(step.get('tab_mode', '直接输入'))
+        self.space_mode_combo.setCurrentText(step.get('space_mode', '直接输入'))
+        self.wait_timeout_spin.setValue(float(step.get('wait_timeout', 10) or 10))
+        self.window_match_type_combo.setCurrentText(step.get('window_match_type', '标题包含'))
+        self.window_match_value_edit.setText(step.get('window_match_value', ''))
+        self.sleep_seconds_spin.setValue(float(step.get('sleep_seconds', 1) or 1))
+        self.use_js_click_check.setChecked(bool(step.get('use_js_click', False)))
+        self.clear_before_input_check.setChecked(bool(step.get('clear_before_input', True)))
+        self.wait_clickable_check.setChecked(bool(step.get('wait_clickable', False)))
+        self.note_edit.setPlainText(step.get('note', ''))
+        self._loading_step = False
+        self.update_action_visibility(self.action_combo.currentText())
+
+    def add_step(self):
+        step = self._new_step(name=f'步骤{len(self.flow_config.get("steps", [])) + 1}')
         self.flow_config.setdefault('steps', []).append(step)
         self.refresh_step_list()
         self.step_list.setCurrentRow(self.step_list.count() - 1)
@@ -620,7 +712,7 @@ class BrowserFlowWindow(QMainWindow):
         if not (0 <= row < len(steps)):
             self.clear_step_editor()
             return
-        step = steps[row]
+        step = self._new_step(**steps[row])
         self._loading_step = True
         self.step_name_edit.setText(step.get('name', ''))
         self.step_condition_edit.setText(step.get('condition_expr', ''))
@@ -633,6 +725,14 @@ class BrowserFlowWindow(QMainWindow):
         self.drag_offset_x_spin.setValue(int(step.get('drag_offset_x', 0) or 0))
         self.drag_offset_y_spin.setValue(int(step.get('drag_offset_y', 0) or 0))
         self.value_template_edit.setPlainText(step.get('value_template', ''))
+        self.page_condition_expr_edit.setText(step.get('page_condition_expr', ''))
+        self.detect_mode_combo.setCurrentText(step.get('detect_mode', '等待判断'))
+        self.on_found_step_spin.setValue(int(step.get('on_found_step', 0) or 0))
+        self.on_not_found_step_spin.setValue(int(step.get('on_not_found_step', 0) or 0))
+        self.on_timeout_step_spin.setValue(int(step.get('on_timeout_step', 0) or 0))
+        self.on_found_message_edit.setText(step.get('on_found_message', ''))
+        self.on_not_found_message_edit.setText(step.get('on_not_found_message', ''))
+        self.on_timeout_message_edit.setText(step.get('on_timeout_message', ''))
         self.newline_mode_combo.setCurrentText(step.get('newline_mode', '直接输入'))
         self.tab_mode_combo.setCurrentText(step.get('tab_mode', '直接输入'))
         self.space_mode_combo.setCurrentText(step.get('space_mode', '直接输入'))
@@ -648,30 +748,38 @@ class BrowserFlowWindow(QMainWindow):
         self.update_action_visibility(self.action_combo.currentText())
 
     def current_step_dict(self):
-        return {
-            'name': self.step_name_edit.text().strip(),
-            'condition_expr': self.step_condition_edit.text().strip(),
-            'action': self.action_combo.currentText(),
-            'locator_type': self.locator_type_combo.currentText(),
-            'locator_value': self.locator_value_edit.text().strip(),
-            'target_locator_type': self.target_locator_type_combo.currentText(),
-            'target_locator_value': self.target_locator_value_edit.text().strip(),
-            'drop_position': self.drop_position_combo.currentText(),
-            'drag_offset_x': self.drag_offset_x_spin.value(),
-            'drag_offset_y': self.drag_offset_y_spin.value(),
-            'value_template': self.value_template_edit.toPlainText(),
-            'newline_mode': self.newline_mode_combo.currentText(),
-            'tab_mode': self.tab_mode_combo.currentText(),
-            'space_mode': self.space_mode_combo.currentText(),
-            'wait_timeout': self.wait_timeout_spin.value(),
-            'window_match_type': self.window_match_type_combo.currentText(),
-            'window_match_value': self.window_match_value_edit.text().strip(),
-            'sleep_seconds': self.sleep_seconds_spin.value(),
-            'use_js_click': self.use_js_click_check.isChecked(),
-            'clear_before_input': self.clear_before_input_check.isChecked(),
-            'wait_clickable': self.wait_clickable_check.isChecked(),
-            'note': self.note_edit.toPlainText(),
-        }
+        return self._new_step(
+            name=self.step_name_edit.text().strip(),
+            condition_expr=self.step_condition_edit.text().strip(),
+            action=self.action_combo.currentText(),
+            locator_type=self.locator_type_combo.currentText(),
+            locator_value=self.locator_value_edit.text().strip(),
+            target_locator_type=self.target_locator_type_combo.currentText(),
+            target_locator_value=self.target_locator_value_edit.text().strip(),
+            drop_position=self.drop_position_combo.currentText(),
+            drag_offset_x=self.drag_offset_x_spin.value(),
+            drag_offset_y=self.drag_offset_y_spin.value(),
+            value_template=self.value_template_edit.toPlainText(),
+            page_condition_expr=self.page_condition_expr_edit.text().strip(),
+            detect_mode=self.detect_mode_combo.currentText(),
+            on_found_step=self.on_found_step_spin.value(),
+            on_not_found_step=self.on_not_found_step_spin.value(),
+            on_timeout_step=self.on_timeout_step_spin.value(),
+            on_found_message=self.on_found_message_edit.text().strip(),
+            on_not_found_message=self.on_not_found_message_edit.text().strip(),
+            on_timeout_message=self.on_timeout_message_edit.text().strip(),
+            newline_mode=self.newline_mode_combo.currentText(),
+            tab_mode=self.tab_mode_combo.currentText(),
+            space_mode=self.space_mode_combo.currentText(),
+            wait_timeout=self.wait_timeout_spin.value(),
+            window_match_type=self.window_match_type_combo.currentText(),
+            window_match_value=self.window_match_value_edit.text().strip(),
+            sleep_seconds=self.sleep_seconds_spin.value(),
+            use_js_click=self.use_js_click_check.isChecked(),
+            clear_before_input=self.clear_before_input_check.isChecked(),
+            wait_clickable=self.wait_clickable_check.isChecked(),
+            note=self.note_edit.toPlainText(),
+        )
 
     def apply_current_step_changes(self, silent=False):
         if self._loading_step:
@@ -686,29 +794,41 @@ class BrowserFlowWindow(QMainWindow):
             self.log('已应用当前步骤修改。')
 
     def update_action_visibility(self, action):
-        locator_needed = action in (ACTION_CLICK, ACTION_INPUT, ACTION_WAIT_ELEMENT, ACTION_SWITCH_IFRAME, ACTION_DRAG)
-        value_needed = action == ACTION_INPUT
+        locator_needed = action in (
+            ACTION_CLICK, ACTION_INPUT, ACTION_MULTI_SELECT, ACTION_RIGHT_CLICK,
+            ACTION_RIGHT_CLICK_MENU, ACTION_DROPDOWN_TWO_STAGE, ACTION_WAIT_ELEMENT,
+            ACTION_WAIT_ELEMENT_GONE, ACTION_SWITCH_IFRAME, ACTION_DRAG,
+            ACTION_PAGE_CONDITION, ACTION_ADD_TABLE, ACTION_FILL_TABLE, ACTION_KEY_COMBO,
+        )
+        value_needed = action in (ACTION_INPUT, ACTION_MULTI_SELECT, ACTION_KEY_COMBO, ACTION_FILL_TABLE)
+        target_needed = action in (ACTION_DRAG, ACTION_RIGHT_CLICK_MENU, ACTION_DROPDOWN_TWO_STAGE)
         window_needed = action == ACTION_SWITCH_WINDOW
         sleep_needed = action == ACTION_SLEEP
         drag_needed = action == ACTION_DRAG
+        detect_needed = action == ACTION_PAGE_CONDITION
 
         self._set_form_row_visible(self.locator_type_combo, locator_needed)
         self._set_form_row_visible(self.locator_value_edit, locator_needed)
-        self._set_form_row_visible(self.target_locator_type_combo, drag_needed)
-        self._set_form_row_visible(self.target_locator_value_edit, drag_needed)
+        self._set_form_row_visible(self.target_locator_type_combo, target_needed)
+        self._set_form_row_visible(self.target_locator_value_edit, target_needed)
         self._set_form_row_visible(self.drop_position_combo, drag_needed)
         self._set_form_row_visible(self.drag_offset_widget, drag_needed)
         self._set_form_row_visible(self.value_template_edit, value_needed)
         self._set_form_row_visible(self.field_insert_widget, value_needed)
-        self._set_form_row_visible(self.newline_mode_combo, value_needed)
-        self._set_form_row_visible(self.tab_mode_combo, value_needed)
-        self._set_form_row_visible(self.space_mode_combo, value_needed)
+        self._set_form_row_visible(self.page_condition_expr_edit, detect_needed)
+        self._set_form_row_visible(self.detect_mode_combo, detect_needed)
+        self._set_form_row_visible(self.branch_found_widget, detect_needed)
+        self._set_form_row_visible(self.branch_not_found_widget, detect_needed)
+        self._set_form_row_visible(self.branch_timeout_widget, detect_needed)
+        self._set_form_row_visible(self.newline_mode_combo, action == ACTION_INPUT)
+        self._set_form_row_visible(self.tab_mode_combo, action == ACTION_INPUT)
+        self._set_form_row_visible(self.space_mode_combo, action == ACTION_INPUT)
         self._set_form_row_visible(self.window_match_type_combo, window_needed)
         self._set_form_row_visible(self.window_match_value_edit, window_needed)
         self._set_form_row_visible(self.sleep_seconds_spin, sleep_needed)
         self.use_js_click_check.setVisible(action == ACTION_CLICK)
-        self.clear_before_input_check.setVisible(action == ACTION_INPUT)
-        self.wait_clickable_check.setVisible(action == ACTION_WAIT_ELEMENT)
+        self.clear_before_input_check.setVisible(action in (ACTION_INPUT, ACTION_FILL_TABLE))
+        self.wait_clickable_check.setVisible(action in (ACTION_WAIT_ELEMENT, ACTION_WAIT_ELEMENT_GONE))
 
     def insert_template_text(self, text):
         cursor = self.value_template_edit.textCursor()
@@ -794,30 +914,13 @@ class BrowserFlowWindow(QMainWindow):
         url = (item.get('url') or '').strip()
         match_type = '标题包含' if title else 'URL包含'
         match_value = title if title else url
-        step = {
-            'name': '切换到目标窗口',
-            'condition_expr': '',
-            'action': ACTION_SWITCH_WINDOW,
-            'locator_type': 'xpath',
-            'locator_value': '',
-            'target_locator_type': 'xpath',
-            'target_locator_value': '',
-            'drop_position': '中间',
-            'drag_offset_x': 0,
-            'drag_offset_y': 0,
-            'value_template': '',
-            'newline_mode': '直接输入',
-            'tab_mode': '直接输入',
-            'space_mode': '直接输入',
-            'wait_timeout': 10,
-            'window_match_type': match_type,
-            'window_match_value': match_value,
-            'sleep_seconds': 1,
-            'use_js_click': False,
-            'clear_before_input': True,
-            'wait_clickable': False,
-            'note': '由当前选中窗口自动生成',
-        }
+        step = self._new_step(
+            name='切换到目标窗口',
+            action=ACTION_SWITCH_WINDOW,
+            window_match_type=match_type,
+            window_match_value=match_value,
+            note='由当前选中窗口自动生成',
+        )
         self.flow_config.setdefault('steps', []).append(step)
         self.refresh_step_list()
         self.step_list.setCurrentRow(self.step_list.count() - 1)
@@ -854,24 +957,87 @@ class BrowserFlowWindow(QMainWindow):
         self.log(f'已录制元素：{locator_type} = {locator_value}')
 
     @staticmethod
+    def _add_locator_candidate(candidates, seen, locator_type, locator_value, label=''):
+        locator_type = str(locator_type or '').strip()
+        locator_value = str(locator_value or '').strip()
+        if not locator_type or not locator_value:
+            return
+        key = (locator_type.lower(), locator_value)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append({'type': locator_type, 'value': locator_value, 'label': str(label or '').strip()})
+
+    @staticmethod
+    def get_locator_candidates(element):
+        candidates = []
+        seen = set()
+        if not element:
+            return candidates
+
+        raw_candidates = element.get('locator_candidates') or []
+        if isinstance(raw_candidates, list):
+            for item in raw_candidates:
+                if not isinstance(item, dict):
+                    continue
+                BrowserFlowWindow._add_locator_candidate(
+                    candidates,
+                    seen,
+                    item.get('type'),
+                    item.get('value'),
+                    item.get('label'),
+                )
+
+        recommended_type = element.get('recommended_locator_type')
+        recommended_value = element.get('recommended_locator_value')
+        if str(recommended_type or '').strip().lower() != 'id':
+            BrowserFlowWindow._add_locator_candidate(candidates, seen, recommended_type, recommended_value, '历史推荐定位')
+
+        BrowserFlowWindow._add_locator_candidate(candidates, seen, 'name', element.get('name'), 'name 属性，通常比动态 id 稳定')
+        placeholder = str(element.get('placeholder') or '').strip()
+        if placeholder and "'" not in placeholder:
+            BrowserFlowWindow._add_locator_candidate(candidates, seen, 'xpath', f"//*[@placeholder='{placeholder}']", 'placeholder XPath')
+        title = str(element.get('title') or '').strip()
+        if title and "'" not in title:
+            BrowserFlowWindow._add_locator_candidate(candidates, seen, 'xpath', f"//*[@title='{title}']", 'title XPath')
+            BrowserFlowWindow._add_locator_candidate(candidates, seen, 'xpath', f"//*[@aria-label='{title}']", 'aria-label XPath')
+        BrowserFlowWindow._add_locator_candidate(candidates, seen, 'xpath', element.get('clickable_xpath'), '可点击元素绝对 XPath')
+        BrowserFlowWindow._add_locator_candidate(candidates, seen, 'xpath', element.get('xpath'), '当前元素绝对 XPath')
+        BrowserFlowWindow._add_locator_candidate(candidates, seen, 'css selector', element.get('clickable_css'), '可点击元素 CSS')
+        BrowserFlowWindow._add_locator_candidate(candidates, seen, 'css selector', element.get('css'), '当前元素 CSS')
+        BrowserFlowWindow._add_locator_candidate(candidates, seen, 'id', element.get('id'), 'id 属性，可能随刷新变化，建议确认后再用')
+        return candidates
+
+    @staticmethod
     def format_recorded_element_info(element):
         if not element:
             return '暂无录制结果。'
         if element.get('error'):
             return f"录制失败：{element.get('error')}"
+        candidates = BrowserFlowWindow.get_locator_candidates(element)
+        locator_type, locator_value = BrowserFlowWindow.choose_best_locator(element)
         lines = [
             f"标签: {element.get('tag', '')}",
             f"文本: {element.get('text', '')}",
             f"id: {element.get('id', '')}",
             f"name: {element.get('name', '')}",
             f"placeholder: {element.get('placeholder', '')}",
-            f"title: {element.get('title', '')}",
+            f"title/aria-label: {element.get('title', '')}",
+            f"自动填入定位: {locator_type} = {locator_value}",
+            '可用定位方式（按推荐顺序；id 已靠后，避免动态 id 优先）：',
+        ]
+        if candidates:
+            for idx, item in enumerate(candidates, start=1):
+                label = item.get('label') or ''
+                suffix = f'  # {label}' if label else ''
+                lines.append(f"  {idx}. {item.get('type', '')} = {item.get('value', '')}{suffix}")
+        else:
+            lines.append('  （未生成可用定位方式）')
+        lines.extend([
             f"XPath: {element.get('xpath', '')}",
             f"可点击XPath: {element.get('clickable_xpath', '')}",
             f"CSS: {element.get('css', '')}",
-            f"推荐定位方式: {element.get('recommended_locator_type', '')}",
-            f"推荐定位值: {element.get('recommended_locator_value', '')}",
-        ]
+        ])
         frame_chain = element.get('frame_chain') or []
         if frame_chain:
             lines.append('所在iframe链:')
@@ -884,24 +1050,14 @@ class BrowserFlowWindow(QMainWindow):
 
     @staticmethod
     def choose_best_locator(element):
-        if not element:
-            return 'xpath', ''
-        if element.get('recommended_locator_type') and element.get('recommended_locator_value'):
-            return element.get('recommended_locator_type'), element.get('recommended_locator_value')
-        if element.get('id'):
-            return 'id', element['id']
-        if element.get('name'):
-            return 'name', element['name']
-        if element.get('clickable_xpath'):
-            return 'xpath', element['clickable_xpath']
-        if element.get('xpath'):
-            return 'xpath', element['xpath']
-        if element.get('clickable_css'):
-            return 'css selector', element['clickable_css']
-        if element.get('css'):
-            return 'css selector', element['css']
+        candidates = BrowserFlowWindow.get_locator_candidates(element)
+        for item in candidates:
+            if str(item.get('type', '')).strip().lower() != 'id':
+                return item.get('type', 'xpath'), item.get('value', '')
+        if candidates:
+            item = candidates[0]
+            return item.get('type', 'xpath'), item.get('value', '')
         return 'xpath', ''
-
     def apply_selected_element_to_step(self, *args, **kwargs):
         element = self.selected_element_info()
         if not element:
@@ -932,33 +1088,26 @@ class BrowserFlowWindow(QMainWindow):
             return
         locator_type, locator_value = self.choose_best_locator(element)
         desc = element.get('text') or element.get('placeholder') or element.get('id') or element.get('name') or element.get('tag')
-        step = {
-            'name': f'{default_action}-{desc}',
-            'condition_expr': '',
-            'action': default_action,
-            'locator_type': locator_type,
-            'locator_value': locator_value,
-            'target_locator_type': 'xpath',
-            'target_locator_value': '',
-            'drop_position': '中间',
-            'drag_offset_x': 0,
-            'drag_offset_y': 0,
-            'value_template': '{__RESULT__}' if default_action == ACTION_INPUT else '',
-            'newline_mode': '直接输入',
-            'tab_mode': '直接输入',
-            'space_mode': '直接输入',
-            'wait_timeout': 10,
-            'window_match_type': '标题包含',
-            'window_match_value': '',
-            'sleep_seconds': 1,
-            'use_js_click': False,
-            'clear_before_input': True,
-            'wait_clickable': False,
-            'note': '由自动录制生成',
-        }
+        step = self._new_step(
+            name=f'{default_action}-{desc}',
+            action=default_action,
+            locator_type=locator_type,
+            locator_value=locator_value,
+            value_template='{__RESULT__}' if default_action == ACTION_INPUT else '',
+            note='由自动录制生成',
+        )
         self.flow_config.setdefault('steps', []).append(step)
         self.refresh_step_list()
         self.step_list.setCurrentRow(self.step_list.count() - 1)
+
+    def _show_flow_alert(self, message, level='info'):
+        text = str(message or '').strip()
+        if not text:
+            return
+        if str(level).lower() in ('warning', 'timeout', 'error'):
+            QMessageBox.warning(self, '流程提示', text)
+        else:
+            QMessageBox.information(self, '流程提示', text)
 
     def test_import(self):
         parent = self.parent()
@@ -975,7 +1124,7 @@ class BrowserFlowWindow(QMainWindow):
                 'data_pool': getattr(parent, '_last_data_pool', {}) or {},
             }
             flow = self.collect_flow(strict=True)
-            self.engine.execute_flow(flow, payload, logger=self.log)
+            self.engine.execute_flow(flow, payload, logger=self.log, alert_handler=self._show_flow_alert)
             QMessageBox.information(self, '成功', '测试导入执行完成。')
         except Exception as e:
             QMessageBox.critical(self, '错误', f'测试导入失败：{e}')

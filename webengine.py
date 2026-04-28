@@ -4,13 +4,14 @@ from decimal import Decimal, ROUND_HALF_UP, ROUND_UP
 from typing import Callable, List, Optional
 
 from selenium import webdriver
-from selenium.common.exceptions import StaleElementReferenceException, WebDriverException
+from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException, TimeoutException, WebDriverException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.ui import Select, WebDriverWait
 
 
 class BrowserEngineError(Exception):
@@ -330,6 +331,20 @@ class BrowserEngine:
         condition = EC.element_to_be_clickable((by, locator_value)) if clickable else EC.presence_of_element_located((by, locator_value))
         return wait.until(condition)
 
+    def wait_for_element_gone(self, locator_type: str, locator_value: str, timeout: float = 10):
+        if not self.is_connected():
+            raise BrowserEngineError('浏览器未连接')
+        self.repair_session_window(activate_preferred=True)
+        by = self._locator_to_by(locator_type)
+        wait = WebDriverWait(self.driver, timeout)
+        return wait.until(EC.invisibility_of_element_located((by, locator_value)))
+
+    def _find_elements(self, locator_type: str, locator_value: str):
+        if not self.is_connected():
+            raise BrowserEngineError('浏览器未连接')
+        self.repair_session_window(activate_preferred=True)
+        by = self._locator_to_by(locator_type)
+        return self.driver.find_elements(by, locator_value)
 
     def _scroll_into_view(self, element):
         try:
@@ -379,6 +394,21 @@ class BrowserEngine:
             raise last_error
         raise BrowserEngineError('点击元素失败')
 
+    def _right_click_element(self, locator_type: str, locator_value: str, timeout: float = 10):
+        element = self._retry_find_element(locator_type, locator_value, timeout=timeout, clickable=True)
+        ActionChains(self.driver).move_to_element(element).context_click(element).perform()
+        return True
+
+    def _right_click_menu_item(self, step: dict, timeout: float = 10):
+        self._right_click_element(step.get('locator_type', ''), step.get('locator_value', ''), timeout=timeout)
+        self._click_element(step.get('target_locator_type', ''), step.get('target_locator_value', ''), timeout=timeout)
+        return True
+
+    def _dropdown_two_stage(self, step: dict, timeout: float = 10):
+        self._click_element(step.get('locator_type', ''), step.get('locator_value', ''), timeout=timeout, use_js_click=bool(step.get('use_js_click', False)))
+        self._click_element(step.get('target_locator_type', ''), step.get('target_locator_value', ''), timeout=timeout)
+        return True
+
     def _input_text(self, locator_type: str, locator_value: str, value: str, timeout: float = 10, clear_before_input: bool = True):
         element = self._retry_find_element(locator_type, locator_value, timeout=timeout, clickable=False)
         if clear_before_input:
@@ -387,6 +417,130 @@ class BrowserEngine:
             except Exception:
                 pass
         self._send_text(element, value)
+        return True
+
+    def _set_element_value(self, element, value: str, clear_before_input: bool = True):
+        tag = (getattr(element, 'tag_name', '') or '').lower()
+        if tag == 'select':
+            self._select_option_like(element, value)
+            return
+        if clear_before_input:
+            try:
+                element.clear()
+            except Exception:
+                try:
+                    self.driver.execute_script("arguments[0].value='';", element)
+                except Exception:
+                    pass
+        try:
+            element.send_keys(value)
+        except Exception:
+            self.driver.execute_script(
+                "arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new Event('input', {bubbles:true})); arguments[0].dispatchEvent(new Event('change', {bubbles:true}));",
+                element,
+                value,
+            )
+
+    def _select_option_like(self, element, value: str):
+        text = '' if value is None else str(value)
+        try:
+            select = Select(element)
+            try:
+                select.select_by_visible_text(text)
+                return True
+            except Exception:
+                pass
+            for option in select.options:
+                if (option.get_attribute('value') or '') == text:
+                    select.select_by_value(text)
+                    return True
+        except Exception:
+            pass
+        try:
+            self.driver.execute_script(
+                "var el=arguments[0], target=arguments[1];"
+                "for (var i=0;i<el.options.length;i++){var o=el.options[i]; if(String(o.text).trim()===target || String(o.value)===target){el.selectedIndex=i; el.dispatchEvent(new Event('change',{bubbles:true})); return true;}} return false;",
+                element,
+                text,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _multi_select(self, locator_type: str, locator_values, timeout: float = 10):
+        values = [str(v).strip() for v in (locator_values or []) if str(v).strip()]
+        if not values:
+            raise BrowserEngineError('多选元素/多行选择至少需要 1 个定位值')
+        actions = ActionChains(self.driver)
+        actions.key_down(Keys.CONTROL)
+        performed = False
+        for value in values:
+            element = self._retry_find_element(locator_type, value, timeout=timeout, clickable=True)
+            self._scroll_into_view(element)
+            actions.click(element)
+            performed = True
+        actions.key_up(Keys.CONTROL)
+        if performed:
+            actions.perform()
+        return performed
+
+    @classmethod
+    def _parse_key_combo(cls, text: str):
+        mapping = {
+            'CTRL': Keys.CONTROL,
+            'CONTROL': Keys.CONTROL,
+            'SHIFT': Keys.SHIFT,
+            'ALT': Keys.ALT,
+            'ENTER': Keys.ENTER,
+            'RETURN': Keys.RETURN,
+            'TAB': Keys.TAB,
+            'ESC': Keys.ESCAPE,
+            'ESCAPE': Keys.ESCAPE,
+            'DELETE': Keys.DELETE,
+            'BACKSPACE': Keys.BACKSPACE,
+            'SPACE': Keys.SPACE,
+            'UP': Keys.ARROW_UP,
+            'DOWN': Keys.ARROW_DOWN,
+            'LEFT': Keys.ARROW_LEFT,
+            'RIGHT': Keys.ARROW_RIGHT,
+            'HOME': Keys.HOME,
+            'END': Keys.END,
+            'PAGEUP': Keys.PAGE_UP,
+            'PAGEDOWN': Keys.PAGE_DOWN,
+        }
+        result = []
+        for part in re.split(r'\s*\+\s*', str(text or '').strip()):
+            part = str(part).strip()
+            if not part:
+                continue
+            upper = part.upper()
+            if upper in mapping:
+                result.append(mapping[upper])
+            elif re.match(r'^F\d{1,2}$', upper):
+                result.append(getattr(Keys, upper, upper))
+            elif len(part) == 1:
+                result.append(part)
+            else:
+                result.append(part)
+        return result
+
+    def _send_key_combo(self, locator_type: str, locator_value: str, combo_text: str, timeout: float = 10):
+        keys = self._parse_key_combo(combo_text)
+        if not keys:
+            raise BrowserEngineError('键盘组合键不能为空')
+        element = None
+        if str(locator_value or '').strip():
+            element = self._retry_find_element(locator_type, locator_value, timeout=timeout, clickable=False)
+            try:
+                element.click()
+            except Exception:
+                pass
+        else:
+            try:
+                element = self.driver.switch_to.active_element
+            except Exception:
+                element = self.driver.find_element(By.TAG_NAME, 'body')
+        ActionChains(self.driver).send_keys_to_element(element, *keys).perform()
         return True
 
     def _drag_drop_element(self, step: dict, timeout: float = 10):
@@ -410,6 +564,123 @@ class BrowserEngine:
         actions.move_to_element_with_offset(target, offset_x, offset_y).pause(0.15).release().perform()
         return True
 
+    def _add_table(self, locator_type: str, locator_value: str, timeout: float = 10):
+        return self._click_element(locator_type, locator_value, timeout=timeout)
+
+    def _fill_table_cells(self, locator_type: str, locator_value: str, table_text: str, timeout: float = 10, clear_before_input: bool = True):
+        table = self._retry_find_element(locator_type, locator_value, timeout=timeout, clickable=False)
+        rows = [line for line in str(table_text or '').splitlines() if line.strip() != '']
+        if not rows:
+            raise BrowserEngineError('自动填单元格内容不能为空')
+        matrix = [line.split('\t') for line in rows]
+        row_nodes = table.find_elements(By.CSS_SELECTOR, 'tr')
+        if not row_nodes:
+            row_nodes = [table]
+        filled = 0
+        for row_index, values in enumerate(matrix):
+            if row_index >= len(row_nodes):
+                break
+            row_node = row_nodes[row_index]
+            cell_inputs = row_node.find_elements(By.CSS_SELECTOR, 'input, textarea, select, [contenteditable="true"]')
+            if not cell_inputs:
+                cell_inputs = row_node.find_elements(By.CSS_SELECTOR, 'td, th')
+            for col_index, value in enumerate(values):
+                if col_index >= len(cell_inputs):
+                    break
+                cell = cell_inputs[col_index]
+                tag = (getattr(cell, 'tag_name', '') or '').lower()
+                if tag in ('td', 'th'):
+                    nested = cell.find_elements(By.CSS_SELECTOR, 'input, textarea, select, [contenteditable="true"]')
+                    if nested:
+                        cell = nested[0]
+                self._scroll_into_view(cell)
+                self._set_element_value(cell, value, clear_before_input=clear_before_input)
+                filled += 1
+        if filled <= 0:
+            raise BrowserEngineError('未找到可填写的表格单元格')
+        return True
+
+    def _wait_until_back_to_main(self, timeout: float = 10):
+        if not self.is_connected():
+            raise BrowserEngineError('浏览器未连接')
+        main_handle = self.main_window_handle
+        def condition(driver):
+            handles = list(driver.window_handles)
+            if main_handle and main_handle in handles and len(handles) == 1:
+                return True
+            try:
+                current = driver.current_window_handle
+            except Exception:
+                current = None
+            return bool(main_handle and current == main_handle and main_handle in handles)
+        WebDriverWait(self.driver, timeout).until(condition)
+        self.switch_to_main_window()
+        return True
+
+    @staticmethod
+    def _emit_alert(alert_handler, message, level='info'):
+        if alert_handler:
+            alert_handler(message, level)
+
+    @staticmethod
+    def _coerce_branch_step(value):
+        try:
+            num = int(float(value or 0))
+        except Exception:
+            num = 0
+        return num if num > 0 else 0
+
+    def _resolve_step_index(self, step_no: int, step_count: int):
+        if step_no <= 0:
+            return None
+        if step_no > step_count:
+            raise BrowserEngineError(f'跳转目标步骤不存在：{step_no}')
+        return step_no - 1
+
+    def _handle_branch_result(self, step: dict, result_key: str, step_count: int, logger=None, alert_handler=None):
+        message_key = {
+            'found': 'on_found_message',
+            'not_found': 'on_not_found_message',
+            'timeout': 'on_timeout_message',
+        }[result_key]
+        step_key = {
+            'found': 'on_found_step',
+            'not_found': 'on_not_found_step',
+            'timeout': 'on_timeout_step',
+        }[result_key]
+        message = str(step.get(message_key, '') or '').strip()
+        if message:
+            self._log(logger, f'页面条件判断提示：{message}')
+            self._emit_alert(alert_handler, message, 'timeout' if result_key == 'timeout' else 'info')
+        target = self._coerce_branch_step(step.get(step_key, 0))
+        return self._resolve_step_index(target, step_count)
+
+    def _evaluate_page_condition(self, step: dict, payload: dict, timeout: float = 10):
+        expr = str(step.get('page_condition_expr', '') or '').strip()
+        if expr:
+            result = self.evaluate_condition_expression(expr, payload)
+            return 'found' if result else 'not_found'
+        locator_type = step.get('locator_type', '')
+        locator_value = step.get('locator_value', '')
+        if not str(locator_value or '').strip():
+            raise BrowserEngineError('页面条件判断未配置定位值，也未配置判断表达式')
+        mode = str(step.get('detect_mode', '等待判断') or '等待判断').strip()
+        try:
+            elements = self._find_elements(locator_type, locator_value)
+            if elements:
+                return 'found'
+        except Exception:
+            pass
+        if mode == '立即判断':
+            return 'not_found'
+        try:
+            self.wait_for_element(locator_type, locator_value, timeout=timeout, clickable=bool(step.get('wait_clickable', False)))
+            return 'found'
+        except TimeoutException:
+            return 'timeout'
+        except Exception:
+            return 'timeout'
+
     def start_element_recording(self, logger=None):
         if not self.is_connected():
             raise BrowserEngineError('浏览器未连接')
@@ -431,11 +702,6 @@ class BrowserEngine:
         while (el && el.nodeType === 1) {
             var selector = (el.nodeName || '').toLowerCase();
             if (!selector) break;
-            if (el.id) {
-                selector += '#' + el.id;
-                path.unshift(selector);
-                break;
-            }
             var nth = 1;
             var sib = el;
             while ((sib = sib.previousElementSibling)) {
@@ -449,7 +715,6 @@ class BrowserEngine:
     }
     function xpath(el) {
         if (!el || el.nodeType !== 1) return '';
-        if (el.id) return '//*[@id=' + '\"' + el.id + '\"' + ']';
         if (el === el.ownerDocument.body) return '/html/body';
         var ix = 0;
         var siblings = el.parentNode ? el.parentNode.childNodes : [];
@@ -522,29 +787,55 @@ class BrowserEngine:
             clickable_xpath: xpath(clickable),
             frame_chain: frameChain || []
         };
-        var recommendedType = '';
-        var recommendedValue = '';
-        if (info.id) {
-            recommendedType = 'id';
-            recommendedValue = info.id;
-        } else if (info.name) {
-            recommendedType = 'name';
-            recommendedValue = info.name;
-        } else if (info.placeholder) {
-            recommendedType = 'xpath';
-            recommendedValue = '//*[' + '@placeholder=' + textLiteral(info.placeholder) + ']';
-        } else if (clickableText) {
-            recommendedType = 'xpath';
-            recommendedValue = makeRowLocator(clickable, clickableText) || makeTextLocator(clickable, clickableText) || info.clickable_xpath || info.xpath;
-        } else if (text) {
-            recommendedType = 'xpath';
-            recommendedValue = makeRowLocator(el, text) || makeTextLocator(el, text) || info.xpath;
-        } else {
-            recommendedType = 'xpath';
-            recommendedValue = info.clickable_xpath || info.xpath || info.clickable_css || info.css;
+        var candidates = [];
+        function addCandidate(type, value, label) {
+            type = String(type || '').trim();
+            value = String(value || '').trim();
+            if (!type || !value) return;
+            for (var i = 0; i < candidates.length; i++) {
+                if (candidates[i].type === type && candidates[i].value === value) return;
+            }
+            candidates.push({type: type, value: value, label: label || ''});
         }
-        info.recommended_locator_type = recommendedType;
-        info.recommended_locator_value = recommendedValue || '';
+        if (info.name) {
+            addCandidate('name', info.name, 'name 属性，通常比动态 id 稳定');
+        }
+        if (info.placeholder) {
+            var placeholderLiteral = textLiteral(info.placeholder);
+            if (placeholderLiteral) {
+                addCandidate('xpath', '//*[' + '@placeholder=' + placeholderLiteral + ']', 'placeholder XPath');
+            }
+        }
+        if (info.title) {
+            var titleLiteral = textLiteral(info.title);
+            if (titleLiteral) {
+                addCandidate('xpath', '//*[@title=' + titleLiteral + ']', 'title XPath');
+                addCandidate('xpath', '//*[@aria-label=' + titleLiteral + ']', 'aria-label XPath');
+            }
+        }
+        if (clickableText) {
+            addCandidate('xpath', makeRowLocator(clickable, clickableText), '可点击行/列表 XPath');
+            addCandidate('xpath', makeTextLocator(clickable, clickableText), '可点击文本 XPath');
+            if ((clickable.tagName || '').toLowerCase() === 'a') {
+                addCandidate('link text', clickableText, '链接完整文本');
+                addCandidate('partial link text', clickableText, '链接部分文本');
+            }
+        }
+        if (text && text !== clickableText) {
+            addCandidate('xpath', makeRowLocator(el, text), '文本所在行/列表 XPath');
+            addCandidate('xpath', makeTextLocator(el, text), '元素文本 XPath');
+        }
+        addCandidate('xpath', info.clickable_xpath, '可点击元素绝对 XPath');
+        addCandidate('xpath', info.xpath, '当前元素绝对 XPath');
+        addCandidate('css selector', info.clickable_css, '可点击元素 CSS');
+        addCandidate('css selector', info.css, '当前元素 CSS');
+        if (info.id) {
+            addCandidate('id', info.id, 'id 属性，可能随刷新变化，建议确认后再用');
+            addCandidate('xpath', '//*[@id=' + '"' + info.id + '"' + ']', 'id XPath，可能随刷新变化');
+        }
+        info.locator_candidates = candidates;
+        info.recommended_locator_type = candidates.length ? candidates[0].type : '';
+        info.recommended_locator_value = candidates.length ? candidates[0].value : '';
         return info;
     }
     function attach(doc, frameChain, handlers) {
@@ -1042,7 +1333,7 @@ class BrowserEngine:
             return
         element.send_keys(value)
 
-    def execute_flow(self, flow_config: dict, payload: dict, logger=None):
+    def execute_flow(self, flow_config: dict, payload: dict, logger=None, alert_handler=None):
         browser_cfg = (flow_config or {}).get('browser', {}) or {}
         self.ensure_connected(browser_cfg, logger=logger)
 
@@ -1067,15 +1358,20 @@ class BrowserEngine:
             'last_window_count': len(self.driver.window_handles),
         }
 
-        for idx, step in enumerate(steps, start=1):
+        idx = 0
+        while idx < len(steps):
+            step = steps[idx] or {}
             action = (step.get('action') or '').strip()
-            name = (step.get('name') or f'步骤{idx}').strip()
+            name = (step.get('name') or f'步骤{idx + 1}').strip()
             timeout = float(step.get('wait_timeout', 10) or 10)
-            self._log(logger, f'[{idx}] {name} - {action}')
+            self._log(logger, f'[{idx + 1}] {name} - {action}')
 
             if not self.evaluate_condition_expression(step.get('condition_expr', ''), payload):
-                self._log(logger, f'[{idx}] 已跳过：未满足执行条件')
+                self._log(logger, f'[{idx + 1}] 已跳过：未满足执行条件')
+                idx += 1
                 continue
+
+            next_index = idx + 1
 
             if action == '点击元素':
                 self._click_element(step.get('locator_type', ''), step.get('locator_value', ''), timeout=timeout, use_js_click=bool(step.get('use_js_click')))
@@ -1086,6 +1382,26 @@ class BrowserEngine:
                 value = self.transform_input_value(value, step)
                 self._input_text(step.get('locator_type', ''), step.get('locator_value', ''), value, timeout=timeout, clear_before_input=bool(step.get('clear_before_input', True)))
 
+            elif action == '多选元素/多行选择':
+                rendered = self.render_value_template(step.get('value_template', ''), payload)
+                locator_values = [line.strip() for line in str(rendered or '').splitlines() if line.strip()]
+                if not locator_values and str(step.get('locator_value', '') or '').strip():
+                    locator_values = [str(step.get('locator_value', '')).strip()]
+                self._multi_select(step.get('locator_type', ''), locator_values, timeout=timeout)
+
+            elif action == '右键点击':
+                self._right_click_element(step.get('locator_type', ''), step.get('locator_value', ''), timeout=timeout)
+
+            elif action == '键盘组合键':
+                combo_text = self.render_value_template(step.get('value_template', ''), payload)
+                self._send_key_combo(step.get('locator_type', ''), step.get('locator_value', ''), combo_text, timeout=timeout)
+
+            elif action == '右键菜单项点击':
+                self._right_click_menu_item(step, timeout=timeout)
+
+            elif action == '下拉菜单两段式操作':
+                self._dropdown_two_stage(step, timeout=timeout)
+
             elif action == '拖拽元素':
                 self._drag_drop_element(step, timeout=timeout)
                 context['last_window_count'] = len(self.driver.window_handles)
@@ -1093,9 +1409,16 @@ class BrowserEngine:
             elif action == '等待元素':
                 self.wait_for_element(step.get('locator_type', ''), step.get('locator_value', ''), timeout=timeout, clickable=bool(step.get('wait_clickable', False)))
 
+            elif action == '等待元素消失':
+                self.wait_for_element_gone(step.get('locator_type', ''), step.get('locator_value', ''), timeout=timeout)
+
             elif action == '等待新窗口':
                 old_count = context.get('last_window_count', len(self.driver.window_handles))
                 WebDriverWait(self.driver, timeout).until(lambda d: len(d.window_handles) > old_count)
+                context['last_window_count'] = len(self.driver.window_handles)
+
+            elif action == '等待窗口关闭/等待回到主窗口':
+                self._wait_until_back_to_main(timeout=timeout)
                 context['last_window_count'] = len(self.driver.window_handles)
 
             elif action == '切换窗口':
@@ -1115,7 +1438,23 @@ class BrowserEngine:
             elif action == '延时':
                 time.sleep(float(step.get('sleep_seconds', 1) or 1))
 
+            elif action == '页面条件判断':
+                result_key = self._evaluate_page_condition(step, payload, timeout=timeout)
+                self._log(logger, f'页面条件判断结果：{result_key}')
+                target_index = self._handle_branch_result(step, result_key, len(steps), logger=logger, alert_handler=alert_handler)
+                if target_index is not None:
+                    next_index = target_index
+
+            elif action == '添加表格':
+                self._add_table(step.get('locator_type', ''), step.get('locator_value', ''), timeout=timeout)
+
+            elif action == '自动填单元格':
+                table_text = self.render_value_template(step.get('value_template', ''), payload)
+                self._fill_table_cells(step.get('locator_type', ''), step.get('locator_value', ''), table_text, timeout=timeout, clear_before_input=bool(step.get('clear_before_input', True)))
+
             else:
                 raise BrowserEngineError(f'不支持的动作：{action}')
+
+            idx = next_index
 
         return True
