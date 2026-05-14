@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import (
 from template_db import TemplateDB
 from dbutils import Database
 from log import log_change
+from gui_helpers import signal_blocked
 
 
 class FieldEditDialog(QDialog):
@@ -169,9 +170,8 @@ class TemplateEditorWindow(QMainWindow):
         return ''.join(str(self.available_fields.get(name, '')) for name in fields)
 
     def update_preview(self):
-        old = self.preview_text.blockSignals(True)
-        self.preview_text.setPlainText(self._computed_preview_text())
-        self.preview_text.blockSignals(old)
+        with signal_blocked(self.preview_text):
+            self.preview_text.setPlainText(self._computed_preview_text())
 
     def update_condition_summary(self, *args):
         name = self._condition_field_name()

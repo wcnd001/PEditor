@@ -23,6 +23,7 @@ from PyQt5.QtCore import Qt, QAbstractTableModel, QModelIndex, QEvent, pyqtSigna
 from PyQt5.QtGui import QFont
 from dbutils import Database
 from log import log_change
+from gui_helpers import signal_blocked
 
 
 class SqlTableDelegate(QStyledItemDelegate):
@@ -366,11 +367,10 @@ class DataManagerWindow(QMainWindow):
         return super().eventFilter(obj, event)
 
     def refresh_table_list(self):
-        self.table_combo.blockSignals(True)
-        self.table_combo.clear()
         tables = self.db.get_tables()
-        self.table_combo.addItems(tables)
-        self.table_combo.blockSignals(False)
+        with signal_blocked(self.table_combo):
+            self.table_combo.clear()
+            self.table_combo.addItems(tables)
 
         if not self.current_table and tables:
             self.table_combo.setCurrentIndex(0)

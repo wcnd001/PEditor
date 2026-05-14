@@ -27,133 +27,36 @@ from PyQt5.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
-    QStyledItemDelegate,
-    QStyleOptionViewItem,
     QStyle,
     QApplication,
 )
 
 from PyQt5.QtGui import QFontMetrics, QPalette
+from gui_helpers import signal_blocked
 
+
+
+
+def qt_safe_single_shot(delay_ms, callback):
+    """安全延后执行 PyQt 回调，避免窗口关闭后定时回调访问已删除控件。"""
+    def runner():
+        try:
+            callback()
+        except RuntimeError:
+            return
+        except Exception:
+            return
+    try:
+        QTimer.singleShot(int(delay_ms), runner)
+    except RuntimeError:
+        return
+    except Exception:
+        return
 
 # 浏览器流程“步骤编辑”表单的最小稳定布局宽度。窗口缩得过窄时不再继续压缩标签/输入框，避免长内容反复重排。
 step_editor_min_layout_width = 520
 
 
-def _wrap_text_flags():
-    flags = Qt.TextWordWrap
-    try:
-        flags = flags | Qt.TextWrapAnywhere
-    except Exception:
-        pass
-    return flags
-
-
-class ComboWordWrapDelegate(QStyledItemDelegate):
-    def _text_width(self, option):
-        parent = self.parent()
-        width = 0
-        try:
-            width = int(parent.property('_pe_wrap_width') or 0)
-        except Exception:
-            width = 0
-        if width <= 0:
-            try:
-                width = int(parent.viewport().width())
-            except Exception:
-                width = 0
-        if width <= 0:
-            try:
-                width = int(parent.width())
-            except Exception:
-                width = 0
-        if width <= 0:
-            try:
-                width = int(option.rect.width())
-            except Exception:
-                width = 0
-        return max(80, int(width) - 12)
-
-    def paint(self, painter, option, index):
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-        text = str(index.data(Qt.DisplayRole) or '')
-        opt.textElideMode = Qt.ElideNone
-        try:
-            opt.features = opt.features | QStyleOptionViewItem.WrapText
-        except Exception:
-            pass
-        style = opt.widget.style() if opt.widget is not None else QApplication.style()
-        text_rect = style.subElementRect(QStyle.SE_ItemViewItemText, opt, opt.widget)
-        opt.text = ''
-        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
-        text_rect.adjust(2, 2, -2, -2)
-        painter.save()
-        try:
-            painter.setFont(opt.font)
-            role = QPalette.HighlightedText if opt.state & QStyle.State_Selected else QPalette.Text
-            painter.setPen(opt.palette.color(role))
-            painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter | _wrap_text_flags(), text)
-        finally:
-            painter.restore()
-
-    def sizeHint(self, option, index):
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-        text = str(index.data(Qt.DisplayRole) or '')
-        metrics = QFontMetrics(opt.font)
-        width = self._text_width(option)
-        try:
-            rect = metrics.boundingRect(0, 0, width, 10000, _wrap_text_flags(), text)
-            height = rect.height() + 8
-        except Exception:
-            height = metrics.lineSpacing() + 8
-        base = super().sizeHint(option, index)
-        return QSize(int(width), max(base.height(), int(height)))
-
-
-def configure_combo_word_wrap(combo: QComboBox, wrap_width=None):
-    if not isinstance(combo, QComboBox):
-        return
-    try:
-        if wrap_width is None:
-            wrap_width = max(80, int(combo.width()) - 34)
-        wrap_width = max(80, int(wrap_width))
-    except Exception:
-        wrap_width = 120
-    try:
-        combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        combo.setProperty('_pe_wrap_width', wrap_width)
-    except Exception:
-        pass
-    try:
-        view = combo.view()
-        view.setProperty('_pe_wrap_width', wrap_width)
-        if hasattr(view, 'setWordWrap'):
-            view.setWordWrap(True)
-        if hasattr(view, 'setTextElideMode'):
-            view.setTextElideMode(Qt.ElideNone)
-        if hasattr(view, 'setUniformItemSizes'):
-            view.setUniformItemSizes(False)
-        try:
-            view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        except Exception:
-            pass
-        view.setFont(combo.font())
-        if not isinstance(view.itemDelegate(), ComboWordWrapDelegate):
-            view.setItemDelegate(ComboWordWrapDelegate(view))
-        try:
-            popup_width = max(100, int(combo.width() or 0), wrap_width + 12)
-            view.setMinimumWidth(popup_width)
-            view.setMaximumWidth(popup_width)
-        except Exception:
-            view.setMinimumWidth(max(100, wrap_width + 12))
-        try:
-            view.doItemsLayout()
-        except Exception:
-            pass
-    except Exception:
-        pass
 
 
 ACTION_CLICK = '点击元素'
@@ -550,7 +453,7 @@ class BrowserFlowWindow(QMainWindow):
             self._step_form_width_update_pending = False
             self._update_step_form_widths()
 
-        QTimer.singleShot(20, run_update)
+        qt_safe_single_shot(20, run_update)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -637,8 +540,6 @@ class BrowserFlowWindow(QMainWindow):
                         field_widget.setMaximumWidth(16777215)
                         field_width = max(140, available_width - int(label_width) - 28)
                         field_widget.setFixedWidth(field_width)
-                        if isinstance(field_widget, QComboBox):
-                            configure_combo_word_wrap(field_widget, wrap_width=max(80, field_width - 34))
                         if field_widget in (getattr(self, 'value_template_edit', None), getattr(self, 'note_edit', None)):
                             field_widget.setMinimumHeight(90)
                     except Exception:
@@ -709,11 +610,10 @@ class BrowserFlowWindow(QMainWindow):
             if name and name not in seen:
                 seen.add(name)
                 ordered.append(name)
-        self.field_combo.blockSignals(True)
-        self.field_combo.clear()
-        for name in ordered:
-            self.field_combo.addItem(name)
-        self.field_combo.blockSignals(False)
+        with signal_blocked(self.field_combo):
+            self.field_combo.clear()
+            for name in ordered:
+                self.field_combo.addItem(name)
     def normalize_start_url_input(self):
         normalized = self.engine.normalize_url(self.start_url_edit.text())
         if normalized != self.start_url_edit.text().strip():
@@ -747,9 +647,8 @@ class BrowserFlowWindow(QMainWindow):
         self.apply_current_step_changes(silent=True)
 
         def _set_text(widget, value):
-            old = widget.blockSignals(True)
-            widget.setText('' if value is None else str(value))
-            widget.blockSignals(old)
+            with signal_blocked(widget):
+                widget.setText('' if value is None else str(value))
 
         browser = self.flow_config.setdefault('browser', self._default_browser())
         browser.update({
@@ -1127,33 +1026,30 @@ class BrowserFlowWindow(QMainWindow):
         # If there is no active browser connection, do not start one implicitly.
         if not getattr(self.engine, 'is_connected', lambda: False)():
             # Clear the combo box but leave any previous selection untouched.
-            self.window_combo.blockSignals(True)
-            self.window_combo.clear()
-            self.window_combo.blockSignals(False)
+            with signal_blocked(self.window_combo):
+                self.window_combo.clear()
             self.log('浏览器未连接，无法刷新窗口列表。请先启动或连接浏览器。')
             return
 
         selected = self.window_combo.currentData() or {}
         selected_handle = selected.get('handle') or getattr(self.engine, 'preferred_window_handle', None)
-        self.window_combo.blockSignals(True)
-        self.window_combo.clear()
         try:
             windows = self.engine.list_windows()
             target_index = -1
-            for idx, item in enumerate(windows):
-                text = f"[{item['index']}] {self._truncate_window_text(item.get('title'), item.get('url'))}"
-                self.window_combo.addItem(text, item)
-                if item.get('handle') == selected_handle and target_index < 0:
-                    target_index = idx
-            if target_index < 0 and windows:
-                target_index = 0
-            if target_index >= 0:
-                self.window_combo.setCurrentIndex(target_index)
+            with signal_blocked(self.window_combo):
+                self.window_combo.clear()
+                for idx, item in enumerate(windows):
+                    text = f"[{item['index']}] {self._truncate_window_text(item.get('title'), item.get('url'))}"
+                    self.window_combo.addItem(text, item)
+                    if item.get('handle') == selected_handle and target_index < 0:
+                        target_index = idx
+                if target_index < 0 and windows:
+                    target_index = 0
+                if target_index >= 0:
+                    self.window_combo.setCurrentIndex(target_index)
             self.log(f'已获取窗口数量：{len(windows)}')
         except Exception as e:
             self.log(f'刷新窗口列表失败：{e}')
-        finally:
-            self.window_combo.blockSignals(False)
         # Automatically set the selected window as the target if any exist.
         if self.window_combo.count() > 0:
             self.set_selected_window_as_target(auto=True)

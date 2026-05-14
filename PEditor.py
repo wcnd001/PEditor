@@ -9,12 +9,11 @@ from PyQt5.QtWidgets import (
     QCheckBox, QDialog, QListWidget, QListWidgetItem, QDialogButtonBox,
     QGroupBox, QAbstractItemView, QScrollArea, QButtonGroup, QMenu,
     QAction, QSplitter, QFormLayout, QSpinBox, QFrame, QToolBar,
-    QToolButton, QSizePolicy, QStylePainter, QStyleOptionComboBox, QStyle,
-    QPlainTextEdit, QTableView, QTableWidget, QDoubleSpinBox, QAbstractSpinBox,
-    QStyledItemDelegate, QStyleOptionViewItem
+    QToolButton, QSizePolicy,
+    QPlainTextEdit, QTableView, QTableWidget, QDoubleSpinBox, QAbstractSpinBox
 )
 from PyQt5.QtCore import Qt, QTimer, QEvent, QSize
-from PyQt5.QtGui import QFont, QFontMetrics, QTextOption, QPalette
+from PyQt5.QtGui import QFont, QFontMetrics, QTextOption
 from dbutils import Database
 from datamanager import DataManagerWindow
 from template_editor import TemplateEditorWindow
@@ -24,12 +23,47 @@ import export
 from webcontrol import BrowserFlowWindow
 from utils import resource_path
 from log import LogViewerDialog, log_change
+from gui_helpers import signal_blocked, wrap_text_flags as _wrap_text_flags
 
 __version__ = '3.0'
 # 主界面输入区的最小布局宽度。左侧分割区域小于此值时，行内控件按该宽度稳定布局，避免长文本反复重排导致卡顿。
 input_option_min_layout_width = 360
 # 打包命令：pyinstaller --clean PEditor.spec --distpath "D:\Microsoft Visual Studio\code"
 
+
+
+class ToolbarMenuButton(QToolButton):
+    """工具栏菜单按钮：使用原生菜单三角，并缓存稳定的 sizeHint。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self._stable_size_sig = None
+        self._stable_size_hint = QSize()
+
+    def stable_size_hint(self):
+        sig = (
+            self.text(),
+            self.font().family(),
+            round(float(self.font().pointSizeF()), 2),
+            type(self.style()).__name__,
+            int(self.popupMode()),
+            bool(self.menu()),
+        )
+        if sig != self._stable_size_sig or not self._stable_size_hint.isValid():
+            try:
+                self.ensurePolished()
+                hint = super().sizeHint()
+                min_hint = super().minimumSizeHint()
+                self._stable_size_hint = QSize(max(hint.width(), min_hint.width()), max(hint.height(), min_hint.height()))
+            except Exception:
+                self._stable_size_hint = QSize(max(56, len(self.text()) * 14), 28)
+            self._stable_size_sig = sig
+        return QSize(self._stable_size_hint)
+
+    def invalidate_stable_size(self):
+        self._stable_size_sig = None
 
 class OptionEditDialog(QDialog):
     def __init__(self, options_config: list, main_db: Database, parent=None):
@@ -294,12 +328,6 @@ def set_widget_point_size(widget, point_size: int):
                     line_edit.setFont(font)
             except Exception:
                 pass
-            try:
-                inner = widget.inner_text_edit() if hasattr(widget, 'inner_text_edit') else None
-                if inner is not None:
-                    inner.setFont(font)
-            except Exception:
-                pass
     except RuntimeError:
         return
     except Exception:
@@ -362,6 +390,30 @@ def adaptive_text_width(widget_or_font, text: str, compactness: int, min_width: 
     return max(int(min_width), min(int(max_width), int(width)))
 
 
+
+
+def qt_safe_single_shot(delay_ms, callback):
+    """安全延后执行 PyQt 回调。
+
+    QTimer.singleShot 使用 Python callable 时，如果控件在定时器触发前
+    已经被删除，回调里访问 Qt C++ 对象会抛出 RuntimeError。
+    这里统一吞掉这类删除后回调，避免窗口关闭/重建输入项时闪退。
+    """
+    def runner():
+        try:
+            callback()
+        except RuntimeError:
+            return
+        except Exception:
+            return
+    try:
+        QTimer.singleShot(int(delay_ms), runner)
+    except RuntimeError:
+        return
+    except Exception:
+        return
+
+
 def wrap_text_by_width(text: str, widget_or_font, max_width: int, max_lines: int = 3) -> str:
     """把固定宽度按钮文本按当前字体插入换行，避免字号变大后文字被裁切。"""
     text = '' if text is None else str(text)
@@ -397,120 +449,6 @@ def wrap_text_by_width(text: str, widget_or_font, max_width: int, max_lines: int
     return '\n'.join(lines)
 
 
-def _wrap_text_flags():
-    """统一换行绘制标志：普通词按词边界换行，连续长数字/长英文也允许拆行。"""
-    flags = Qt.TextWordWrap
-    try:
-        flags = flags | Qt.TextWrapAnywhere
-    except Exception:
-        pass
-    return flags
-
-
-class ComboWordWrapDelegate(QStyledItemDelegate):
-    """下拉菜单列表项换行代理。
-
-    关键点：每次绘制和计算高度都只使用当前下拉框/列表的实际宽度，
-    不使用上一轮 option.rect、sizeHint 或内容自然宽度叠加，避免下拉项
-    宽度越算越大，导致看起来没有自动换行。
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-
-    def _text_width(self, option):
-        parent = self.parent()
-        width = 0
-        try:
-            width = int(parent.property('_pe_wrap_width') or 0)
-        except Exception:
-            width = 0
-        if width <= 0:
-            try:
-                width = int(parent.viewport().width())
-            except Exception:
-                width = 0
-        if width <= 0:
-            try:
-                width = int(parent.width())
-            except Exception:
-                width = 0
-        if width <= 0:
-            try:
-                width = int(option.rect.width())
-            except Exception:
-                width = 0
-        return max(80, int(width) - 12)
-
-    def paint(self, painter, option, index):
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-        text = str(index.data(Qt.DisplayRole) or '')
-        opt.textElideMode = Qt.ElideNone
-        try:
-            opt.features = opt.features | QStyleOptionViewItem.WrapText
-        except Exception:
-            pass
-        style = opt.widget.style() if opt.widget is not None else QApplication.style()
-        text_rect = style.subElementRect(QStyle.SE_ItemViewItemText, opt, opt.widget)
-        opt.text = ''
-        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
-        text_rect.adjust(2, 2, -2, -2)
-        painter.save()
-        try:
-            painter.setFont(opt.font)
-            role = QPalette.HighlightedText if opt.state & QStyle.State_Selected else QPalette.Text
-            painter.setPen(opt.palette.color(role))
-            painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter | _wrap_text_flags(), text)
-        finally:
-            painter.restore()
-
-    def sizeHint(self, option, index):
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-        text = str(index.data(Qt.DisplayRole) or '')
-        metrics = QFontMetrics(opt.font)
-        width = self._text_width(option)
-        try:
-            rect = metrics.boundingRect(0, 0, width, 10000, _wrap_text_flags(), text)
-            height = rect.height() + 8
-        except Exception:
-            height = metrics.lineSpacing() + 8
-        base = super().sizeHint(option, index)
-        return QSize(int(width), max(base.height(), int(height)))
-
-
-class WrapComboBox(QComboBox):
-    """当前项文本可换行绘制的下拉框。"""
-
-    def showPopup(self):
-        try:
-            option = QStyleOptionComboBox()
-            self.initStyleOption(option)
-            text_rect = self.style().subControlRect(QStyle.CC_ComboBox, option, QStyle.SC_ComboBoxEditField, self)
-            wrap_width = max(80, int(text_rect.width()) - 4)
-        except Exception:
-            wrap_width = max(80, int(self.width()) - 34)
-        configure_combo_word_wrap(self, wrap_width=wrap_width)
-        try:
-            self.view().doItemsLayout()
-        except Exception:
-            pass
-        super().showPopup()
-
-    def paintEvent(self, event):
-        if self.isEditable():
-            super().paintEvent(event)
-            return
-        painter = QStylePainter(self)
-        option = QStyleOptionComboBox()
-        self.initStyleOption(option)
-        text = option.currentText
-        option.currentText = ''
-        painter.drawComplexControl(QStyle.CC_ComboBox, option)
-        text_rect = self.style().subControlRect(QStyle.CC_ComboBox, option, QStyle.SC_ComboBoxEditField, self)
-        text_rect.adjust(2, 0, -2, 0)
-        painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft | _wrap_text_flags(), text)
 
 
 class AutoWrapTextEdit(QTextEdit):
@@ -668,315 +606,9 @@ class AutoWrapTextEdit(QTextEdit):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._sync_document_text_width()
-        QTimer.singleShot(0, self.update_auto_height)
+        qt_safe_single_shot(0, self.update_auto_height)
 
 
-class EditableWrapComboBox(WrapComboBox):
-    """可输入且可换行的下拉框。
-
-    Qt 原生 QComboBox 的可输入区域是 QLineEdit，QLineEdit 只能单行显示，
-    所以输入长文本时必然会横向溢出或滚动。本类保留 QComboBox 的下拉
-    列表能力，在编辑区域覆盖一个 AutoWrapTextEdit，让当前输入文字也按
-    控件真实宽度换行，并随字体变化立即重排。
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._syncing_inner_text = False
-        self._combo_layout_updating = False
-        self._single_line_height = 24
-        self._max_auto_height = 96
-        self._text_width = 80
-        super().setEditable(True)
-        try:
-            line_edit = super().lineEdit()
-            if line_edit is not None:
-                line_edit.hide()
-                line_edit.setReadOnly(True)
-        except Exception:
-            pass
-        self._inner_edit = AutoWrapTextEdit(self)
-        self._inner_edit.setObjectName('editableComboInnerText')
-        self._inner_edit.setFrameShape(QFrame.NoFrame)
-        self._inner_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._inner_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._inner_edit.setStyleSheet('QTextEdit#editableComboInnerText { border: none; background: transparent; padding: 0px; }')
-        self._inner_edit.textChanged.connect(self._on_inner_text_changed)
-        try:
-            self._inner_edit.installEventFilter(self)
-            viewport = self._inner_edit.viewport()
-            if viewport is not None:
-                viewport.installEventFilter(self)
-        except Exception:
-            pass
-        self.currentIndexChanged.connect(self._sync_inner_from_index)
-        try:
-            # currentIndexChanged 在部分 PyQt5 环境中只会更新内部 index，
-            # 这里额外监听 activated/pressed，保证点击下拉项后覆盖的多行编辑区同步显示选中内容。
-            self.activated.connect(self._on_popup_activated)
-        except Exception:
-            pass
-        try:
-            self.view().pressed.connect(self._on_view_pressed)
-        except Exception:
-            pass
-        QTimer.singleShot(0, self.update_inner_editor_geometry)
-
-    def inner_text_edit(self):
-        return self._inner_edit
-
-    def setEditable(self, editable):
-        # 这个控件设计上始终可输入；保留方法用于兼容旧代码调用。
-        super().setEditable(True)
-        try:
-            line_edit = super().lineEdit()
-            if line_edit is not None:
-                line_edit.hide()
-        except Exception:
-            pass
-
-    def currentText(self):
-        try:
-            return self._inner_edit.toPlainText()
-        except Exception:
-            return super().currentText()
-
-    def setCurrentText(self, text):
-        text = '' if text is None else str(text)
-        self._set_inner_text(text, emit_signal=False)
-        try:
-            index = self.findText(text)
-            if index >= 0:
-                old = self.blockSignals(True)
-                super().setCurrentIndex(index)
-                self.blockSignals(old)
-            else:
-                super().setEditText(text)
-        except Exception:
-            pass
-        self.update_inner_editor_geometry()
-
-    def setEditText(self, text):
-        self.setCurrentText(text)
-
-    def clearEditText(self):
-        self.setCurrentText('')
-
-    def setCurrentIndex(self, index):
-        super().setCurrentIndex(index)
-        self._sync_inner_from_index(index)
-
-    def _set_inner_text(self, text, emit_signal=True):
-        text = '' if text is None else str(text)
-        try:
-            if self._inner_edit.toPlainText() == text:
-                return
-            self._syncing_inner_text = True
-            old = self._inner_edit.blockSignals(True)
-            self._inner_edit.setPlainTextPreserveSignal(text)
-            self._inner_edit.blockSignals(old)
-        except Exception:
-            try:
-                self._inner_edit.setPlainText(text)
-            except Exception:
-                pass
-        finally:
-            self._syncing_inner_text = False
-        if emit_signal:
-            try:
-                self.currentTextChanged.emit(text)
-            except Exception:
-                pass
-
-    def _sync_inner_from_index(self, index, emit_signal=True):
-        if getattr(self, '_syncing_inner_text', False):
-            return
-        try:
-            index = int(index)
-        except Exception:
-            index = self.currentIndex()
-        try:
-            if index >= 0:
-                self._set_inner_text(self.itemText(index), emit_signal=bool(emit_signal))
-        except Exception:
-            pass
-        self.update_inner_editor_geometry()
-        self._request_parent_layout()
-
-    def _on_popup_activated(self, value=None):
-        try:
-            index = int(value)
-        except Exception:
-            index = self.currentIndex()
-        self._sync_inner_from_index(index, emit_signal=True)
-
-    def _on_view_pressed(self, model_index):
-        try:
-            row = model_index.row()
-            if row >= 0:
-                old = self.blockSignals(True)
-                super().setCurrentIndex(row)
-                self.blockSignals(old)
-                self._sync_inner_from_index(row, emit_signal=True)
-                QTimer.singleShot(0, self.hidePopup)
-        except Exception:
-            pass
-
-    def _request_parent_layout(self):
-        parent = self.parentWidget()
-        while parent is not None:
-            if hasattr(parent, 'update_adaptive_size'):
-                try:
-                    QTimer.singleShot(0, parent.update_adaptive_size)
-                except Exception:
-                    pass
-                return
-            parent = parent.parentWidget()
-
-    def _on_inner_text_changed(self):
-        if getattr(self, '_syncing_inner_text', False):
-            return
-        text = self.currentText()
-        try:
-            line_edit = super().lineEdit()
-            if line_edit is not None:
-                old = line_edit.blockSignals(True)
-                line_edit.setText(text)
-                line_edit.blockSignals(old)
-        except Exception:
-            pass
-        try:
-            self.currentTextChanged.emit(text)
-        except Exception:
-            pass
-        self.update_inner_editor_geometry()
-        self._request_parent_layout()
-
-    def setFont(self, font):
-        super().setFont(font)
-        try:
-            self._inner_edit.setFont(font)
-            self.view().setFont(font)
-        except Exception:
-            pass
-        self.update_inner_editor_geometry()
-
-    def _edit_field_rect(self):
-        try:
-            option = QStyleOptionComboBox()
-            self.initStyleOption(option)
-            rect = self.style().subControlRect(QStyle.CC_ComboBox, option, QStyle.SC_ComboBoxEditField, self)
-            rect.adjust(2, 1, -2, -1)
-            return rect
-        except Exception:
-            return self.rect().adjusted(4, 2, -24, -2)
-
-    def set_auto_layout(self, single_line_height, max_height, text_width):
-        try:
-            self._single_line_height = max(20, int(single_line_height))
-            self._max_auto_height = max(self._single_line_height, int(max_height))
-            self._text_width = max(1, int(text_width))
-            self._inner_edit.set_available_text_width(self._text_width)
-            self._inner_edit.set_auto_limits(self._single_line_height, self._max_auto_height)
-            self._inner_edit.update_auto_height()
-            height = max(self._single_line_height, min(self._max_auto_height, self._inner_edit.height()))
-            if self.height() != height:
-                self.setFixedHeight(height)
-        except Exception:
-            try:
-                self.setFixedHeight(int(single_line_height))
-            except Exception:
-                pass
-        self.update_inner_editor_geometry()
-
-    def update_inner_editor_geometry(self):
-        if getattr(self, '_combo_layout_updating', False):
-            return
-        self._combo_layout_updating = True
-        try:
-            try:
-                rect = self._edit_field_rect()
-                self._inner_edit.setGeometry(rect)
-                self._inner_edit.raise_()
-                text_width = max(1, int(rect.width()) - 4)
-                self._text_width = text_width
-                self._inner_edit.set_available_text_width(text_width)
-                self._inner_edit.update_auto_height()
-                target_height = max(self._single_line_height, min(self._max_auto_height, self._inner_edit.height()))
-                if self.height() != target_height:
-                    self.setFixedHeight(target_height)
-            except Exception:
-                pass
-            try:
-                configure_combo_word_wrap(self, wrap_width=max(80, int(self.width()) - 34))
-            except Exception:
-                pass
-        finally:
-            self._combo_layout_updating = False
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self.update_inner_editor_geometry()
-
-    def showPopup(self):
-        self.update_inner_editor_geometry()
-        super().showPopup()
-
-    def eventFilter(self, watched, event):
-        # 点击内部多行文本框时，不弹出下拉框，只用于输入；点击右侧箭头仍由 QComboBox 处理。
-        return super().eventFilter(watched, event)
-
-
-def configure_combo_word_wrap(combo: QComboBox, wrap_width=None):
-    """让下拉菜单当前项和下拉列表项都按当前控件宽度换行。"""
-    if not isinstance(combo, QComboBox):
-        return
-    try:
-        if wrap_width is None:
-            wrap_width = max(80, int(combo.width()) - 34)
-        wrap_width = max(80, int(wrap_width))
-    except Exception:
-        wrap_width = 120
-    try:
-        combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        combo.setProperty('_pe_wrap_width', wrap_width)
-    except Exception:
-        pass
-    try:
-        view = combo.view()
-        view.setProperty('_pe_wrap_width', wrap_width)
-        if hasattr(view, 'setWordWrap'):
-            view.setWordWrap(True)
-        if hasattr(view, 'setTextElideMode'):
-            view.setTextElideMode(Qt.ElideNone)
-        if hasattr(view, 'setUniformItemSizes'):
-            view.setUniformItemSizes(False)
-        try:
-            view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        except Exception:
-            pass
-        view.setFont(combo.font())
-        delegate = view.itemDelegate()
-        if not isinstance(delegate, ComboWordWrapDelegate):
-            view.setItemDelegate(ComboWordWrapDelegate(view))
-        try:
-            popup_width = max(100, int(combo.width() or 0), wrap_width + 12)
-            # 下拉列表宽度以当前控件宽度为主，不再被最长内容反向撑大；
-            # 内容超过宽度时由 ComboWordWrapDelegate 自动换行。
-            view.setMinimumWidth(popup_width)
-            view.setMaximumWidth(popup_width)
-            view.doItemsLayout()
-        except Exception:
-            pass
-    except Exception:
-        pass
-    try:
-        line_edit = combo.lineEdit()
-        if line_edit is not None:
-            line_edit.setFont(combo.font())
-            line_edit.setToolTip(line_edit.text())
-    except Exception:
-        pass
 
 
 class UiSettingsDialog(QDialog):
@@ -1182,19 +814,8 @@ class InputOptionRow(QWidget):
         except Exception:
             pass
         try:
-            inner_edit = self.editor.inner_text_edit() if hasattr(self.editor, 'inner_text_edit') else None
-            if inner_edit is not None:
-                inner_edit.installEventFilter(self)
-                viewport = inner_edit.viewport()
-                if viewport is not None:
-                    viewport.installEventFilter(self)
-        except Exception:
-            pass
-        try:
             if isinstance(self.editor, QTextEdit):
-                self.editor.document().contentsChanged.connect(lambda: QTimer.singleShot(0, self.update_adaptive_size))
-            elif hasattr(self.editor, 'inner_text_edit'):
-                self.editor.inner_text_edit().document().contentsChanged.connect(lambda: QTimer.singleShot(0, self.update_adaptive_size))
+                self.editor.document().contentsChanged.connect(lambda: qt_safe_single_shot(0, self.update_adaptive_size))
         except Exception:
             pass
 
@@ -1302,31 +923,16 @@ class InputOptionRow(QWidget):
             self.editor.setFixedWidth(max(60, int(editor_width)))
         except Exception:
             pass
-        if isinstance(self.editor, EditableWrapComboBox):
+        if isinstance(self.editor, QComboBox):
+            # 下拉菜单和可输入下拉菜单恢复 PyQt 原生单行样式，不再做自定义换行/弹窗绘制。
             self.editor.setMinimumHeight(single_line_height)
-            self.editor.setMaximumHeight(max_input_height)
-            text_width = max(60, int(editor_width) - 34)
-            configure_combo_word_wrap(self.editor, wrap_width=text_width)
-            self.editor.set_auto_layout(single_line_height, max_input_height, text_width)
-        elif isinstance(self.editor, QComboBox):
-            self.editor.setMinimumHeight(single_line_height)
-            self.editor.setMaximumHeight(max_input_height)
+            self.editor.setMaximumHeight(single_line_height)
+            self.editor.setFixedHeight(single_line_height)
             try:
-                text_width = max(60, int(editor_width) - 34)
                 self.editor.view().setMinimumWidth(max(100, int(editor_width)))
-                self.editor.view().setMaximumWidth(max(100, int(editor_width)))
-                self.editor.view().setWordWrap(True)
-                self.editor.view().setTextElideMode(Qt.ElideNone)
+                self.editor.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
             except Exception:
-                text_width = max(60, int(editor_width) - 34)
-            configure_combo_word_wrap(self.editor, wrap_width=text_width)
-            try:
-                wrapped = wrap_text_by_width(self.editor.currentText(), self.editor.font(), text_width, max_lines=6)
-                line_count = max(1, wrapped.count('\n') + 1)
-                combo_height = adaptive_control_height(self.editor, compact, min_height=24, lines=line_count)
-                self.editor.setFixedHeight(min(max_input_height, max(single_line_height, combo_height)))
-            except Exception:
-                self.editor.setFixedHeight(single_line_height)
+                pass
         elif isinstance(self.editor, QTextEdit):
             self.editor.setLineWrapMode(QTextEdit.WidgetWidth)
             try:
@@ -1397,15 +1003,7 @@ class InputOptionRow(QWidget):
         font.setPointSize(option_font_size)
         for widget in (self, self.handle, self.label, self.editor):
             widget.setFont(font)
-        if isinstance(self.editor, EditableWrapComboBox):
-            try:
-                self.editor.inner_text_edit().setFont(font)
-            except Exception:
-                pass
-            configure_combo_word_wrap(self.editor)
-        elif isinstance(self.editor, QComboBox):
-            configure_combo_word_wrap(self.editor)
-        elif isinstance(self.editor, AutoWrapTextEdit):
+        if isinstance(self.editor, AutoWrapTextEdit):
             self.editor.update_auto_height()
         margin = max(1, option_compact // 2)
         spacing = max(1, option_compact // 2)
@@ -1461,11 +1059,6 @@ class InputOptionRow(QWidget):
             try:
                 line_edit = self.editor.lineEdit() if isinstance(self.editor, QComboBox) and self.editor.isEditable() else None
                 is_editor_part = is_editor_part or watched == line_edit
-            except Exception:
-                pass
-            try:
-                inner_edit = self.editor.inner_text_edit() if hasattr(self.editor, 'inner_text_edit') else None
-                is_editor_part = is_editor_part or watched == inner_edit or watched == inner_edit.viewport()
             except Exception:
                 pass
             if is_editor_part:
@@ -1585,7 +1178,6 @@ class TemplateSelectRow(QWidget):
                 self.template_combo.view().setMinimumWidth(max(int(combo_width), option_font_size * 20))
             except Exception:
                 pass
-            configure_combo_word_wrap(self.template_combo)
             _, margin_top, _, margin_bottom = self.row_layout.getContentsMargins()
             label_height = self.label.heightForWidth(self.label.width()) if self.label.hasHeightForWidth() else metrics.lineSpacing()
             label_height = max(metrics.lineSpacing() + option_compact * 2, int(label_height) + option_compact)
@@ -1726,7 +1318,15 @@ class CopyButtonItem(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.update_adaptive_size()
+        try:
+            viewport_width = self.main_window.copy_scroll.viewport().width() if self.main_window is not None and hasattr(self.main_window, 'copy_scroll') else 0
+            sig = (int(event.size().width()), int(event.size().height()), int(viewport_width), round(float(self.font().pointSizeF()), 2))
+            if sig == getattr(self, '_last_resize_sig', None):
+                return
+            self._last_resize_sig = sig
+            qt_safe_single_shot(0, self.update_adaptive_size)
+        except Exception:
+            qt_safe_single_shot(0, self.update_adaptive_size)
 
     def handle_mouse_press(self, event):
         if event.button() == Qt.LeftButton:
@@ -1903,8 +1503,7 @@ class PEditor(QMainWindow):
         copy_padding_h = max(2, copy_compact + 2)
 
         return (
-            f"QToolBar#mainToolbar QToolButton {{ padding: {toolbar_padding_v}px {toolbar_padding_h + 14}px {toolbar_padding_v}px {toolbar_padding_h}px; min-height: {toolbar_min_height}px; }}\n"
-            "QToolBar#mainToolbar QToolButton::menu-indicator { subcontrol-origin: padding; subcontrol-position: center right; right: 4px; }\n"
+            f"QToolBar#mainToolbar QToolButton {{ padding: {toolbar_padding_v}px {toolbar_padding_h}px; min-height: {toolbar_min_height}px; }}\n"
             f"QWidget#inputOptionRow QLineEdit, QWidget#inputOptionRow QTextEdit, QWidget#inputOptionRow QComboBox, QWidget#templateSelectRow QComboBox {{ "
             f"padding: {option_padding_v}px {option_padding_h}px; min-height: {option_min_height}px; }}\n"
             f"QWidget#copyButtonItem QPushButton {{ padding: {copy_padding_v}px {copy_padding_h}px; min-height: {copy_min_height}px; }}\n"
@@ -1929,6 +1528,8 @@ class PEditor(QMainWindow):
         """
         merged = self._normalize_ui_settings(settings)
         self._ui_settings = merged
+        self._force_next_adaptive_refresh = True
+        self._toolbar_metrics_sig = None
         try:
             app = QApplication.instance()
             if app is not None:
@@ -2007,16 +1608,12 @@ class PEditor(QMainWindow):
                 if viewport is not None:
                     viewport.setFont(font)
             elif isinstance(widget, QComboBox):
-                configure_combo_word_wrap(widget)
                 view = widget.view()
                 if view is not None:
                     view.setFont(font)
                 line_edit = widget.lineEdit() if widget.isEditable() else None
                 if line_edit is not None:
                     line_edit.setFont(font)
-                inner = widget.inner_text_edit() if hasattr(widget, 'inner_text_edit') else None
-                if inner is not None:
-                    inner.setFont(font)
         except RuntimeError:
             return
         except Exception:
@@ -2055,9 +1652,6 @@ class PEditor(QMainWindow):
                             widget.setMinimumWidth(max(widget.minimumWidth(), base_size * 10))
                             try:
                                 wrap_width = max(80, int(widget.width() or widget.minimumWidth()) - 34)
-                                configure_combo_word_wrap(widget, wrap_width=wrap_width)
-                                widget.view().setWordWrap(True)
-                                widget.view().setTextElideMode(Qt.ElideNone)
                             except Exception:
                                 pass
                     elif isinstance(widget, (QTextEdit, QPlainTextEdit)):
@@ -2117,8 +1711,6 @@ class PEditor(QMainWindow):
                             field_widget.setMinimumWidth(field_width)
                             if isinstance(field_widget, (QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QAbstractSpinBox)):
                                 field_widget.setMinimumHeight(min_height)
-                                if isinstance(field_widget, QComboBox):
-                                    configure_combo_word_wrap(field_widget, wrap_width=max(80, field_width - 34))
                             elif isinstance(field_widget, (QPlainTextEdit, QTextEdit)):
                                 field_widget.setMinimumHeight(text_min_height)
                             elif isinstance(field_widget, QWidget):
@@ -2152,20 +1744,33 @@ class PEditor(QMainWindow):
         toolbar_font = QFont()
         toolbar_font.setPointSize(toolbar_font_size)
         toolbar_height = adaptive_control_height(toolbar_font, toolbar_compact, min_height=22)
+        toolbar_sig = (
+            toolbar_font_size,
+            toolbar_compact,
+            type(self.style()).__name__,
+            tuple(button.text() for button in getattr(self, 'toolbar_buttons', []) or []),
+        )
+        refresh_toolbar_width = toolbar_sig != getattr(self, '_toolbar_metrics_sig', None)
+        self._toolbar_metrics_sig = toolbar_sig
         if hasattr(self, 'main_toolbar'):
             self._safe_set_font(self.main_toolbar, toolbar_font_size)
             self._safe_set_fixed_height(self.main_toolbar, toolbar_height + max(2, toolbar_compact // 2))
             for button in list(getattr(self, 'toolbar_buttons', []) or []):
                 try:
                     self._safe_set_font(button, toolbar_font_size)
-                    button_width = adaptive_text_width(button, button.text(), toolbar_compact, min_width=max(56, toolbar_font_size * 5), max_width=max(180, toolbar_font_size * 14))
-                    # 固定工具栏菜单按钮宽度，避免拖拽选项/复制项后菜单指示三角因重新布局而跳动。
-                    try:
-                        button.setFixedWidth(button_width)
-                    except Exception:
-                        self._safe_set_min_width(button, button_width)
-                    self._safe_set_min_height(button, toolbar_height)
+                    button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
                     button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+                    if refresh_toolbar_width:
+                        if hasattr(button, 'invalidate_stable_size'):
+                            button.invalidate_stable_size()
+                        if hasattr(button, 'stable_size_hint'):
+                            hint = button.stable_size_hint()
+                        else:
+                            button.ensurePolished()
+                            hint = button.sizeHint()
+                        button_width = max(int(hint.width()), int(button.minimumSizeHint().width()), max(56, toolbar_font_size * 4))
+                        button.setFixedWidth(button_width)
+                    self._safe_set_min_height(button, toolbar_height)
                     menu = button.menu() if hasattr(button, 'menu') else None
                     if menu is not None:
                         self._safe_set_font(menu, toolbar_font_size)
@@ -2245,7 +1850,7 @@ class PEditor(QMainWindow):
             self._refresh_adaptive_rows_pending = False
             self._refresh_main_adaptive_rows()
 
-        QTimer.singleShot(60, run_refresh)
+        qt_safe_single_shot(60, run_refresh)
 
     def _refresh_main_adaptive_rows(self):
         """刷新首页输入行和复制项尺寸。
@@ -2256,9 +1861,15 @@ class PEditor(QMainWindow):
         try:
             raw_input_width = int(self.input_scroll.viewport().width()) if hasattr(self, 'input_scroll') else 0
             effective_input_width = max(raw_input_width, int(self.option_row_min_layout_width()))
+            settings = self._normalize_ui_settings(getattr(self, '_ui_settings', self._default_ui_settings()))
             current_widths = (
                 effective_input_width,
                 int(self.copy_scroll.viewport().width()) if hasattr(self, 'copy_scroll') else 0,
+                scaled_point_size(settings, 'option_font_size', 10),
+                int(settings.get('option_compactness', 4)),
+                int(settings.get('option_input_height', 96)),
+                scaled_point_size(settings, 'copy_font_size', 10),
+                int(settings.get('copy_compactness', 4)),
             )
             if getattr(self, '_last_adaptive_refresh_widths', None) == current_widths and not getattr(self, '_force_next_adaptive_refresh', False):
                 return
@@ -2384,7 +1995,6 @@ class PEditor(QMainWindow):
                     widget.setCurrentText(text_value)
                 else:
                     widget.setCurrentIndex(0)
-            configure_combo_word_wrap(widget)
         elif isinstance(widget, QCheckBox):
             widget.setChecked(str(value).lower() in ('true', '1', 'yes', 'checked'))
 
@@ -2393,16 +2003,10 @@ class PEditor(QMainWindow):
         if widget is None:
             return
         try:
-            old = widget.blockSignals(True)
+            with signal_blocked(widget):
+                self._set_widget_value(widget, value)
         except Exception:
-            old = None
-        try:
             self._set_widget_value(widget, value)
-        finally:
-            try:
-                widget.blockSignals(old)
-            except Exception:
-                pass
 
     def _remember_input_values(self):
         """保存当前输入区内容。除 clear_inputs 外，任何配置改动前都应调用。"""
@@ -2473,10 +2077,11 @@ class PEditor(QMainWindow):
         return action
 
     def _add_toolbar_menu(self, toolbar, title, action_items):
-        tool_btn = QToolButton(self)
+        tool_btn = ToolbarMenuButton(self)
         tool_btn.setObjectName('toolbarMenuButton')
         tool_btn.setText(title)
         tool_btn.setPopupMode(QToolButton.InstantPopup)
+        tool_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         menu = QMenu(tool_btn)
         menu.setObjectName('toolbarMenu')
         for item in action_items:
@@ -2495,6 +2100,8 @@ class PEditor(QMainWindow):
         toolbar = QToolBar('工具栏')
         toolbar.setObjectName('mainToolbar')
         toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+        toolbar.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.main_toolbar = toolbar
         self.toolbar_buttons = []
         self.addToolBar(toolbar)
@@ -2542,10 +2149,11 @@ class PEditor(QMainWindow):
             ('导出至浏览器', self.export_current_to_browser, 'browser_export_btn'),
         ])
 
-        self.copy_tool_btn = QToolButton(self)
+        self.copy_tool_btn = ToolbarMenuButton(self)
         self.copy_tool_btn.setObjectName('toolbarMenuButton')
         self.copy_tool_btn.setText('复制选项编辑')
         self.copy_tool_btn.setPopupMode(QToolButton.InstantPopup)
+        self.copy_tool_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         copy_menu = QMenu(self.copy_tool_btn)
         copy_menu.setObjectName('toolbarMenu')
         self._new_toolbar_action(copy_menu, '添加工序', self.show_add_copy_button_menu, 'add_copy_btn')
@@ -2652,7 +2260,7 @@ class PEditor(QMainWindow):
         # 复制按钮区需要横向滚动；不让内容容器被强行压缩到视口宽度。
         self.copy_scroll.setWidgetResizable(False)
         self.copy_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.copy_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.copy_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.copy_scroll.setFrameShape(QFrame.NoFrame)
         self.copy_scroll_widget = QFrame()
         self.copy_scroll_widget.setFrameShape(QFrame.NoFrame)
@@ -2710,9 +2318,8 @@ class PEditor(QMainWindow):
             (self.browser_binary_edit, browser.get('chrome_binary', '')),
             (self.browser_url_edit, browser.get('start_url', '')),
         ):
-            old = widget.blockSignals(True)
-            widget.setText(self._normalize_text(value))
-            widget.blockSignals(old)
+            with signal_blocked(widget):
+                widget.setText(self._normalize_text(value))
 
     def _save_browser_settings_for_current_template(self, silent=True):
         if not self.current_template_name:
@@ -2831,19 +2438,17 @@ class PEditor(QMainWindow):
     def load_template_list(self):
         previous_values = self.collect_input_values() if getattr(self, 'option_rows', None) else dict(getattr(self, '_input_value_cache', {}) or {})
         previous = self.current_template_name
-        self.template_combo.blockSignals(True)
-        self.template_combo.clear()
         temps = self.template_db.get_main_templates()
-        for t in temps:
-            self.template_combo.addItem(t['name'], t)
-        self.template_combo.blockSignals(False)
+        with signal_blocked(self.template_combo):
+            self.template_combo.clear()
+            for t in temps:
+                self.template_combo.addItem(t['name'], t)
 
         self._live_process_content = None
         if temps:
             target_name = previous if previous and any(t['name'] == previous for t in temps) else temps[0]['name']
-            old_block = self.template_combo.blockSignals(True)
-            self.template_combo.setCurrentText(target_name)
-            self.template_combo.blockSignals(old_block)
+            with signal_blocked(self.template_combo):
+                self.template_combo.setCurrentText(target_name)
             self._load_template_by_name(target_name)
         else:
             self.current_template_name = None
@@ -3099,8 +2704,8 @@ class PEditor(QMainWindow):
         self._apply_runtime_ui_settings()
         self.refresh_dynamic_combo_options()
         try:
-            QTimer.singleShot(0, self._refresh_main_adaptive_rows)
-            QTimer.singleShot(80, self._refresh_main_adaptive_rows)
+            qt_safe_single_shot(0, self._refresh_main_adaptive_rows)
+            qt_safe_single_shot(80, self._refresh_main_adaptive_rows)
         except Exception:
             pass
 
@@ -3111,12 +2716,17 @@ class PEditor(QMainWindow):
             editor.setPlaceholderText('')
             return editor
         if widget_type in ('combo', 'editable_combo'):
-            combo = EditableWrapComboBox() if widget_type == 'editable_combo' else WrapComboBox()
+            combo = QComboBox()
+            if widget_type == 'editable_combo':
+                combo.setEditable(True)
             combo.addItem('')
             options = self.data_matcher.get_field_options(opt.get('source', {}), input_values=initial_values or {})
             combo.addItems(options if options else ['（无选项）'])
             combo.setCurrentIndex(0)
-            configure_combo_word_wrap(combo)
+            try:
+                combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            except Exception:
+                pass
             return combo
         if widget_type == 'checkbox':
             return QCheckBox()
@@ -3124,10 +2734,8 @@ class PEditor(QMainWindow):
 
     def setup_input_change_tracking(self):
         for widget in self.input_widgets:
-            try:
-                widget.disconnect()
-            except Exception:
-                pass
+            if getattr(widget, '_pe_input_tracking_bound', False):
+                continue
             if isinstance(widget, QTextEdit):
                 widget.textChanged.connect(self.on_input_widget_changed)
             elif isinstance(widget, QLineEdit):
@@ -3136,6 +2744,10 @@ class PEditor(QMainWindow):
                 widget.currentTextChanged.connect(self.on_input_widget_changed)
             elif isinstance(widget, QCheckBox):
                 widget.stateChanged.connect(self.on_input_widget_changed)
+            try:
+                widget._pe_input_tracking_bound = True
+            except Exception:
+                pass
 
     def clear_selected_option_row(self):
         if self.selected_option_row is not None:
@@ -3273,6 +2885,7 @@ class PEditor(QMainWindow):
 
 
     def on_input_widget_changed(self, *args):
+        source_widget = self.sender()
         if self._updating_option_sources:
             try:
                 self._remember_input_values()
@@ -3284,14 +2897,68 @@ class PEditor(QMainWindow):
             self._remember_input_values()
         except Exception:
             pass
-        self.refresh_dynamic_combo_options()
+        self.refresh_dynamic_combo_options(source_widget=source_widget)
         try:
             self._remember_input_values()
         except Exception:
             pass
         self.update_result_text()
 
-    def refresh_dynamic_combo_options(self):
+    @staticmethod
+    def _editable_combo_is_user_typing(widget, source_widget=None):
+        if not isinstance(widget, QComboBox) or not widget.isEditable():
+            return False
+        line_edit = widget.lineEdit()
+        try:
+            return widget is source_widget or line_edit is source_widget or bool(line_edit and line_edit.hasFocus())
+        except RuntimeError:
+            return False
+
+    def _update_combo_items_preserve_text(self, widget, normalized_options, current_text):
+        """刷新下拉项，同时保留可输入下拉框当前文本和光标位置。"""
+        line_edit = widget.lineEdit() if isinstance(widget, QComboBox) and widget.isEditable() else None
+        cursor_pos = None
+        selection_start = -1
+        selection_length = 0
+        if line_edit is not None:
+            try:
+                cursor_pos = line_edit.cursorPosition()
+                if line_edit.hasSelectedText():
+                    selection_start = line_edit.selectionStart()
+                    selection_length = len(line_edit.selectedText())
+            except RuntimeError:
+                line_edit = None
+
+        blockers = []
+        try:
+            blockers.append(signal_blocked(widget))
+            blockers[-1].__enter__()
+            if line_edit is not None:
+                blockers.append(signal_blocked(line_edit))
+                blockers[-1].__enter__()
+            widget.clear()
+            widget.addItems(normalized_options)
+            if widget.isEditable():
+                widget.setEditText(current_text)
+                if line_edit is not None:
+                    line_edit.setText(current_text)
+                    if selection_start >= 0 and selection_length > 0:
+                        line_edit.setSelection(selection_start, selection_length)
+                    elif cursor_pos is not None:
+                        line_edit.setCursorPosition(max(0, min(int(cursor_pos), len(current_text))))
+            else:
+                if current_text in normalized_options:
+                    widget.setCurrentText(current_text)
+                else:
+                    widget.setCurrentIndex(0)
+        finally:
+            for blocker in reversed(blockers):
+                try:
+                    blocker.__exit__(None, None, None)
+                except Exception:
+                    pass
+
+    def refresh_dynamic_combo_options(self, source_widget=None):
         if self._updating_option_sources:
             return
         self._updating_option_sources = True
@@ -3308,22 +2975,25 @@ class PEditor(QMainWindow):
                 normalized_options = [''] + (options if options else ['（无选项）'])
                 current_items = [widget.itemText(i) for i in range(widget.count())]
                 current_text = widget.currentText()
-                # 动态下拉项变化时，不因临时匹配不到选项而清空用户已选/已输入内容。
+
+                if widget.isEditable():
+                    # 用户正在当前可输入下拉框里打字时，不刷新这个控件自己的候选项。
+                    # 否则 clear/addItems/setEditText 会让 QLineEdit 光标跳到末尾，造成“a1bc11111”这类错位输入。
+                    if self._editable_combo_is_user_typing(widget, source_widget):
+                        continue
+                    # 可输入下拉框允许任意文本，不需要把用户当前文本临时追加到候选项中。
+                    # 这样候选列表不会随每个输入字符变化，也不会反复触发重排和光标复位。
+                    if current_items == normalized_options:
+                        continue
+                    self._update_combo_items_preserve_text(widget, normalized_options, current_text)
+                    continue
+
+                # 普通不可输入下拉框无法显示列表外文本；为避免动态候选项变化时清空已有选择，临时保留当前值。
                 if current_text and current_text not in normalized_options:
                     normalized_options.append(current_text)
                 if current_items == normalized_options:
                     continue
-                old = widget.blockSignals(True)
-                widget.clear()
-                widget.addItems(normalized_options)
-                if current_text in normalized_options:
-                    widget.setCurrentText(current_text)
-                elif widget.isEditable() and current_text:
-                    widget.setEditText(current_text)
-                else:
-                    widget.setCurrentIndex(0)
-                configure_combo_word_wrap(widget)
-                widget.blockSignals(old)
+                self._update_combo_items_preserve_text(widget, normalized_options, current_text)
         finally:
             self._updating_option_sources = False
 
@@ -3451,9 +3121,8 @@ class PEditor(QMainWindow):
     def _apply_copy_button_checked_state(self, fields=None):
         selected = set(self._normalize_copy_selected_fields(fields))
         for item_widget, field in self.copy_buttons:
-            old = item_widget.blockSignals(True)
-            item_widget.setChecked(field in selected)
-            item_widget.blockSignals(old)
+            with signal_blocked(item_widget):
+                item_widget.setChecked(field in selected)
 
     def select_copy_item(self, item_widget, toggle=True):
         if item_widget is None:

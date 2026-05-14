@@ -25,7 +25,7 @@ a = Analysis(
         # 这里不要放 PEditor_教程.txt
         # 否则 PyInstaller 6 默认会把它放进 _internal
     ],
-    hiddenimports=[],
+    hiddenimports=['gui_helpers'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
