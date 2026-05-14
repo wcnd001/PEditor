@@ -1,15 +1,18 @@
 import sys
 import json
 import os
+import traceback
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QComboBox, QPushButton, QTextEdit,
     QMessageBox, QFileDialog, QLabel, QInputDialog, QGridLayout,
     QCheckBox, QDialog, QListWidget, QListWidgetItem, QDialogButtonBox,
     QGroupBox, QAbstractItemView, QScrollArea, QButtonGroup, QMenu,
-    QAction, QSplitter, QFormLayout, QSpinBox
+    QAction, QSplitter, QFormLayout, QSpinBox, QFrame, QToolBar,
+    QToolButton, QSizePolicy
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QEvent
+from PyQt5.QtGui import QFont
 from dbutils import Database
 from datamanager import DataManagerWindow
 from template_editor import TemplateEditorWindow
@@ -20,7 +23,7 @@ from webcontrol import BrowserFlowWindow
 from utils import resource_path
 from log import LogViewerDialog, log_change
 
-__version__ = '2.7'
+__version__ = '3.0'
 # 打包命令：pyinstaller --clean PEditor.spec --distpath "D:\Microsoft Visual Studio\code"
 
 
@@ -244,33 +247,57 @@ class OptionEditDialog(QDialog):
 
 
 class UiSettingsDialog(QDialog):
+    """界面设置窗口：分别设置选项、工具栏、复制按钮、预览框的字体和紧凑程度。"""
+
     def __init__(self, current_settings: dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle('界面设置')
-        self.resize(360, 180)
+        self.resize(520, 330)
         self._settings = dict(current_settings or {})
         self.init_ui()
+
+    @staticmethod
+    def _int_value(settings, key, default):
+        try:
+            return int(settings.get(key, default))
+        except Exception:
+            return int(default)
+
+    def _make_spin(self, key, default, minimum, maximum):
+        spin = QSpinBox()
+        spin.setRange(minimum, maximum)
+        spin.setValue(self._int_value(self._settings, key, default))
+        return spin
 
     def init_ui(self):
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
-        self.font_size_spin = QSpinBox()
-        self.font_size_spin.setRange(8, 24)
-        self.font_size_spin.setValue(int(self._settings.get('font_size', 10) or 10))
-        form.addRow('字体大小:', self.font_size_spin)
+        self.option_font_spin = self._make_spin('option_font_size', 10, 8, 30)
+        form.addRow('选项字体大小:', self.option_font_spin)
+        self.option_compact_spin = self._make_spin('option_compactness', 4, 0, 30)
+        form.addRow('选项紧凑程度:', self.option_compact_spin)
 
-        self.compact_combo = QComboBox()
-        self.compact_combo.addItems(['很紧凑', '紧凑', '标准', '宽松'])
-        compactness = str(self._settings.get('button_compactness', '紧凑') or '紧凑')
-        idx = self.compact_combo.findText(compactness)
-        self.compact_combo.setCurrentIndex(idx if idx >= 0 else 1)
-        form.addRow('按钮紧凑度:', self.compact_combo)
+        self.toolbar_font_spin = self._make_spin('toolbar_font_size', 10, 8, 30)
+        form.addRow('工具栏字体大小:', self.toolbar_font_spin)
+        self.toolbar_compact_spin = self._make_spin('toolbar_compactness', 4, 0, 30)
+        form.addRow('工具栏紧凑程度:', self.toolbar_compact_spin)
+
+        self.copy_font_spin = self._make_spin('copy_font_size', 10, 8, 30)
+        form.addRow('复制按钮字体大小:', self.copy_font_spin)
+        self.copy_compact_spin = self._make_spin('copy_compactness', 4, 0, 30)
+        form.addRow('复制按钮紧凑程度:', self.copy_compact_spin)
+
+        self.preview_font_spin = self._make_spin('preview_font_size', 11, 8, 36)
+        form.addRow('预览框字体大小:', self.preview_font_spin)
+        self.preview_compact_spin = self._make_spin('preview_compactness', 4, 0, 30)
+        form.addRow('预览框紧凑程度:', self.preview_compact_spin)
 
         layout.addLayout(form)
-        hint = QLabel('按钮内边距会跟随字体大小自动联动，字体越大按钮会同步变高。')
+        hint = QLabel('紧凑程度为数字：数值越小越紧凑，数值越大控件内边距和行高越大。')
         hint.setWordWrap(True)
         layout.addWidget(hint)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -278,9 +305,360 @@ class UiSettingsDialog(QDialog):
 
     def get_settings(self):
         return {
-            'font_size': int(self.font_size_spin.value()),
-            'button_compactness': self.compact_combo.currentText(),
+            'option_font_size': int(self.option_font_spin.value()),
+            'option_compactness': int(self.option_compact_spin.value()),
+            'toolbar_font_size': int(self.toolbar_font_spin.value()),
+            'toolbar_compactness': int(self.toolbar_compact_spin.value()),
+            'copy_font_size': int(self.copy_font_spin.value()),
+            'copy_compactness': int(self.copy_compact_spin.value()),
+            'preview_font_size': int(self.preview_font_spin.value()),
+            'preview_compactness': int(self.preview_compact_spin.value()),
         }
+
+
+class BrowserSettingsDialog(QDialog):
+    """主界面工具栏中的浏览器参数设置窗口。"""
+
+    def __init__(self, browser_settings: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('浏览器参数设置')
+        self.resize(680, 220)
+        self.browser_settings = dict(browser_settings or {})
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.driver_edit = QLineEdit()
+        self.driver_edit.setPlaceholderText('chromedriver.exe 路径')
+        self.driver_edit.setText(str(self.browser_settings.get('chromedriver_path', '') or ''))
+        form.addRow('Driver路径:', self.driver_edit)
+
+        self.binary_edit = QLineEdit()
+        self.binary_edit.setPlaceholderText('chrome.exe 路径，可留空')
+        self.binary_edit.setText(str(self.browser_settings.get('chrome_binary', '') or ''))
+        form.addRow('浏览器路径:', self.binary_edit)
+
+        self.url_edit = QLineEdit()
+        self.url_edit.setPlaceholderText('点击打开浏览器时使用的 URL')
+        self.url_edit.setText(str(self.browser_settings.get('start_url', '') or ''))
+        form.addRow('启动URL:', self.url_edit)
+
+        layout.addLayout(form)
+        hint = QLabel('这些参数仍然保存到当前模板的浏览器流程配置中。')
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_browser_settings(self):
+        return {
+            'chromedriver_path': self.driver_edit.text().strip(),
+            'chrome_binary': self.binary_edit.text().strip(),
+            'start_url': self.url_edit.text().strip(),
+        }
+
+
+class InputOptionRow(QWidget):
+    """GTE 风格的输入选项行：左侧拖动柄，中间标签，右侧输入控件。"""
+
+    def __init__(self, option_config: dict, editor_widget, main_window, parent=None):
+        super().__init__(parent)
+        self.setObjectName('inputOptionRow')
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumHeight(34)
+        self.option_config = option_config
+        self.editor = editor_widget
+        self.main_window = main_window
+        self.drag_start_y = None
+        self.mouse_dragging = False
+
+        self.row_layout = QHBoxLayout(self)
+        self.row_layout.setContentsMargins(3, 3, 3, 3)
+        self.row_layout.setSpacing(4)
+
+        self.handle = QLabel('☰')
+        self.handle.setObjectName('inputOptionHandle')
+        self.handle.setFixedWidth(24)
+        self.handle.setAlignment(Qt.AlignCenter)
+        self.handle.setCursor(Qt.SizeAllCursor)
+        self.handle.mousePressEvent = self.handle_mouse_press
+        self.handle.mouseMoveEvent = self.handle_mouse_move
+        self.handle.mouseReleaseEvent = self.handle_mouse_release
+
+        self.label = QLabel(self.get_wrap_text(self.get_name()))
+        self.label.setObjectName('inputOptionLabel')
+        self.label.setWordWrap(True)
+        # ===============================================================
+        # 选项标签长度/宽度相关修改位置
+        # 后续如果要改标签宽度、最大宽度、换行效果，可优先修改这里和 update_label_max_width()
+        # ===============================================================
+        self.update_label_max_width()
+        self.label.mousePressEvent = self.label_mouse_press
+
+        self.editor.installEventFilter(self)
+        self.row_layout.addWidget(self.handle)
+        self.row_layout.addWidget(self.label)
+        self.row_layout.addWidget(self.editor, 1)
+        self.set_selected(False)
+
+    def get_name(self):
+        return str(self.option_config.get('label', '') or '')
+
+    def set_name(self, name):
+        self.option_config['label'] = str(name or '').strip()
+        self.label.setText(self.get_wrap_text(self.get_name()))
+        self.update_label_max_width()
+
+    def get_wrap_text(self, text):
+        return '\u200b'.join(str(text))
+
+    # ===============================================================
+    # 选项标签长度/宽度相关修改位置
+    # 主要修改点：label_width = max(72, min(170, left_panel_width // 4))
+    # 72 表示最小固定宽度，170 表示最大固定宽度，left_panel_width // 4 表示约占左侧面板四分之一
+    # 使用 setFixedWidth 固定标签宽度，可避免点击选中变色时输入框宽度抖动
+    # ===============================================================
+    def update_label_max_width(self):
+        """稳定输入行标签宽度，避免点击选中后因为样式刷新导致整行宽度抖动。"""
+        left_panel_width = 0
+        try:
+            if hasattr(self.main_window, 'input_scroll') and self.main_window.input_scroll is not None:
+                left_panel_width = self.main_window.input_scroll.viewport().width()
+        except Exception:
+            left_panel_width = 0
+        if left_panel_width <= 0:
+            left_panel_width = 420
+        # 标签宽度跟随左侧面板整体宽度变化，但使用固定宽度而不是最大宽度；
+        # 这样选中/取消选中只改变颜色，不会触发布局重新分配导致输入框宽度变化。
+        label_width = max(72, min(170, left_panel_width // 4))
+        self.label.setFixedWidth(label_width)
+
+    def set_selected(self, selected):
+        border = '#2563eb' if selected else '#d1d5db'
+        background = '#dbeafe' if selected else '#ffffff'
+        handle_background = '#bfdbfe' if selected else '#f3f4f6'
+        self.setStyleSheet(
+            f"QWidget#inputOptionRow {{ background-color: {background}; border: 1px solid {border}; border-radius: 3px; }}"
+            f"QLabel#inputOptionHandle {{ background-color: {handle_background}; border-right: 1px solid #d1d5db; }}"
+            "QLabel#inputOptionLabel { background-color: transparent; border: none; }"
+        )
+
+    def apply_ui_settings(self, settings):
+        option_font_size = int(settings.get('option_font_size', 10))
+        option_compact = int(settings.get('option_compactness', 4))
+        font = QFont()
+        font.setPointSize(option_font_size)
+        for widget in (self, self.handle, self.label, self.editor):
+            widget.setFont(font)
+        margin = max(1, option_compact // 2)
+        spacing = max(1, option_compact // 2)
+        self.row_layout.setContentsMargins(margin, margin, margin, margin)
+        self.row_layout.setSpacing(spacing)
+        row_height = max(30, option_font_size + option_compact * 2 + 12)
+        editor_height = max(22, option_font_size + option_compact * 2 + 10)
+        self.setMinimumHeight(row_height)
+        self.editor.setMinimumHeight(editor_height)
+        self.update_label_max_width()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_label_max_width()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.main_window.select_option_row(self)
+        super().mousePressEvent(event)
+
+    def label_mouse_press(self, event):
+        if event.button() == Qt.LeftButton:
+            self.main_window.select_option_row(self)
+
+    def handle_mouse_press(self, event):
+        if event.button() == Qt.LeftButton:
+            self.drag_start_y = event.globalY()
+            self.mouse_dragging = False
+            self.main_window.select_option_row(self, toggle=False)
+
+    def handle_mouse_move(self, event):
+        if self.drag_start_y is None:
+            return
+        if abs(event.globalY() - self.drag_start_y) >= 3:
+            self.mouse_dragging = True
+            self.main_window.move_option_row_by_mouse(self, event.globalPos())
+
+    def handle_mouse_release(self, event):
+        self.drag_start_y = None
+        if self.mouse_dragging:
+            self.main_window.sync_option_order_from_rows(save=True)
+        self.mouse_dragging = False
+
+    def eventFilter(self, watched, event):
+        if watched == self.editor and event.type() == QEvent.MouseButtonPress:
+            if event.button() == Qt.LeftButton:
+                self.main_window.select_option_row(self, toggle=False)
+        return super().eventFilter(watched, event)
+
+
+class TemplateSelectRow(QWidget):
+    """固定在选项面板顶部的模板选择行，不参与输入值采集和拖拽排序。"""
+
+    def __init__(self, template_combo, main_window, parent=None):
+        super().__init__(parent)
+        self.setObjectName('templateSelectRow')
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumHeight(34)
+        self.template_combo = template_combo
+        self.main_window = main_window
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.setSpacing(4)
+
+        # 固定首行不再显示“固定”字样，仅保留一个空白占位宽度，使模板行和普通选项行左侧对齐。
+        fixed_mark = QLabel('')
+        fixed_mark.setObjectName('templateFixedMark')
+        fixed_mark.setFixedWidth(24)
+        fixed_mark.setAlignment(Qt.AlignCenter)
+
+        label = QLabel('模板')
+        label.setObjectName('templateSelectLabel')
+        label.setFixedWidth(60)
+        label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+
+        self.template_combo.setMinimumWidth(120)
+        self.template_combo.view().setMinimumWidth(260)
+        layout.addWidget(fixed_mark)
+        layout.addWidget(label)
+        layout.addWidget(self.template_combo, 1)
+        self.setStyleSheet(
+            'QWidget#templateSelectRow { background-color: #f9fafb; border: 1px solid #9ca3af; border-radius: 3px; }'
+            'QLabel#templateFixedMark { background-color: transparent; border: none; }'
+            'QLabel#templateSelectLabel { background-color: transparent; border: none; font-weight: bold; }'
+        )
+
+    def apply_ui_settings(self, settings):
+        option_font_size = int(settings.get('option_font_size', 10))
+        option_compact = int(settings.get('option_compactness', 4))
+        font = QFont()
+        font.setPointSize(option_font_size)
+        self.setFont(font)
+        for child in self.findChildren(QWidget):
+            child.setFont(font)
+        margin = max(1, option_compact // 2)
+        spacing = max(1, option_compact // 2)
+        layout = self.layout()
+        if layout is not None:
+            layout.setContentsMargins(margin, margin, margin, margin)
+            layout.setSpacing(spacing)
+        row_height = max(30, option_font_size + option_compact * 2 + 12)
+        combo_height = max(22, option_font_size + option_compact * 2 + 10)
+        self.setMinimumHeight(row_height)
+        self.template_combo.setMinimumHeight(combo_height)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.main_window.clear_selected_option_row()
+        super().mousePressEvent(event)
+
+
+class CopyButtonItem(QWidget):
+    """下方复制按钮区的 GTE 风格横向滚动项目：上方拖动柄，下方按钮。"""
+
+    def __init__(self, field_name: str, main_window, parent=None):
+        super().__init__(parent)
+        self.setObjectName('copyButtonItem')
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.field_name = str(field_name or '').strip()
+        self.main_window = main_window
+        self.drag_start_x = None
+        self.mouse_dragging = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(3)
+
+        self.handle = QLabel('☰')
+        self.handle.setObjectName('copyButtonHandle')
+        self.handle.setAlignment(Qt.AlignCenter)
+        self.handle.setFixedHeight(22)
+        self.handle.setCursor(Qt.SizeAllCursor)
+        self.handle.mousePressEvent = self.handle_mouse_press
+        self.handle.mouseMoveEvent = self.handle_mouse_move
+        self.handle.mouseReleaseEvent = self.handle_mouse_release
+
+        self.button = QPushButton(self.field_name)
+        self.button.setCheckable(True)
+        self.button.setMinimumWidth(92)
+        self.button.setMaximumWidth(180)
+        self.button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.button.clicked.connect(lambda checked, f=self.field_name: self.main_window.on_copy_button_clicked(self, f, checked))
+
+        layout.addWidget(self.handle)
+        layout.addWidget(self.button)
+        self.set_selected(False)
+
+    def apply_ui_settings(self, settings):
+        copy_font_size = int(settings.get('copy_font_size', 10))
+        copy_compact = int(settings.get('copy_compactness', 4))
+        font = QFont()
+        font.setPointSize(copy_font_size)
+        for widget in (self, self.handle, self.button):
+            widget.setFont(font)
+        margin = max(1, copy_compact // 2)
+        spacing = max(1, copy_compact // 2)
+        layout = self.layout()
+        if layout is not None:
+            layout.setContentsMargins(margin, margin, margin, margin)
+            layout.setSpacing(spacing)
+        self.handle.setFixedHeight(max(18, copy_font_size + copy_compact + 8))
+        self.button.setMinimumHeight(max(22, copy_font_size + copy_compact * 2 + 8))
+        self.adjustSize()
+
+    def isChecked(self):
+        return self.button.isChecked()
+
+    def setChecked(self, checked):
+        self.button.setChecked(bool(checked))
+        self.set_selected(bool(checked))
+
+    def blockSignals(self, block):
+        return self.button.blockSignals(block)
+
+    def set_selected(self, selected):
+        border = '#2563eb' if selected else '#d1d5db'
+        background = '#dbeafe' if selected else '#ffffff'
+        handle_background = '#bfdbfe' if selected else '#f3f4f6'
+        self.setStyleSheet(
+            f"QWidget#copyButtonItem {{ background-color: {background}; border: 1px solid {border}; border-radius: 3px; }}"
+            f"QLabel#copyButtonHandle {{ background-color: {handle_background}; border-bottom: 1px solid #d1d5db; }}"
+        )
+
+    def handle_mouse_press(self, event):
+        if event.button() == Qt.LeftButton:
+            self.drag_start_x = event.globalX()
+            self.mouse_dragging = False
+            self.main_window.select_copy_item(self, toggle=False)
+
+    def handle_mouse_move(self, event):
+        if self.drag_start_x is None:
+            return
+        if abs(event.globalX() - self.drag_start_x) >= 3:
+            self.mouse_dragging = True
+            self.main_window.move_copy_item_by_mouse(self, event.globalPos())
+
+    def handle_mouse_release(self, event):
+        self.drag_start_x = None
+        if self.mouse_dragging:
+            self.main_window.sync_copy_order_from_items(save=True)
+        self.mouse_dragging = False
 
 
 class PEditor(QMainWindow):
@@ -292,6 +670,8 @@ class PEditor(QMainWindow):
         self.current_template_name = None
         self.current_options_config = []
         self.current_rules_config = []
+        self.option_rows = []
+        self.selected_option_row = None
         self.input_widgets = []
         self.copy_buttons = []
         self.copy_button_group = QButtonGroup(self)
@@ -335,8 +715,14 @@ class PEditor(QMainWindow):
     @staticmethod
     def _default_ui_settings():
         return {
-            'font_size': 10,
-            'button_compactness': '紧凑',
+            'option_font_size': 10,
+            'option_compactness': 4,
+            'toolbar_font_size': 10,
+            'toolbar_compactness': 4,
+            'copy_font_size': 10,
+            'copy_compactness': 4,
+            'preview_font_size': 11,
+            'preview_compactness': 4,
         }
 
     def _load_settings_payload(self):
@@ -347,42 +733,201 @@ class PEditor(QMainWindow):
                     loaded = json.load(f) or {}
                     if isinstance(loaded, dict):
                         settings.update(loaded)
+                        # 兼容旧版 settings.json：旧版只有 font_size/button_compactness 时，自动迁移到四类设置。
+                        if 'font_size' in loaded:
+                            old_font = self._safe_int(loaded.get('font_size'), settings['option_font_size'], 8, 36)
+                            for key in ('option_font_size', 'toolbar_font_size', 'copy_font_size', 'preview_font_size'):
+                                if key not in loaded:
+                                    settings[key] = old_font
         except Exception as e:
             print(f'加载设置失败：{e}')
-        return settings
+        return self._normalize_ui_settings(settings)
 
-    def _build_app_stylesheet(self, font_size: int, button_compactness: str):
+    @staticmethod
+    def _safe_int(value, default, minimum=0, maximum=99):
         try:
-            font_size = max(8, min(24, int(font_size)))
+            number = int(value)
         except Exception:
-            font_size = 10
-        compact_map = {
-            '很紧凑': (4, 1, 6),
-            '紧凑': (6, 2, 8),
-            '标准': (8, 4, 10),
-            '宽松': (12, 6, 12),
-        }
-        pad_h, pad_v, extra_h = compact_map.get(button_compactness, compact_map['紧凑'])
-        min_height = max(font_size + extra_h + pad_v * 2, 22)
-        combo_height = max(min_height, font_size + extra_h + 2)
+            number = int(default)
+        return max(int(minimum), min(int(maximum), number))
+
+    def _normalize_ui_settings(self, settings: dict):
+        defaults = self._default_ui_settings()
+        payload = dict(defaults)
+        if isinstance(settings, dict):
+            payload.update(settings)
+        for key in ('option_font_size', 'toolbar_font_size', 'copy_font_size'):
+            payload[key] = self._safe_int(payload.get(key), defaults[key], 8, 30)
+        payload['preview_font_size'] = self._safe_int(payload.get('preview_font_size'), defaults['preview_font_size'], 8, 36)
+        for key in ('option_compactness', 'toolbar_compactness', 'copy_compactness', 'preview_compactness'):
+            payload[key] = self._safe_int(payload.get(key), defaults[key], 0, 30)
+        return payload
+
+    def _build_app_stylesheet(self, settings: dict):
+        settings = self._normalize_ui_settings(settings)
+        option_font = settings['option_font_size']
+        option_compact = settings['option_compactness']
+        toolbar_font = settings['toolbar_font_size']
+        toolbar_compact = settings['toolbar_compactness']
+        copy_font = settings['copy_font_size']
+        copy_compact = settings['copy_compactness']
+        preview_font = settings['preview_font_size']
+        preview_compact = settings['preview_compactness']
+
+        option_min_height = max(22, option_font + option_compact * 2 + 10)
+        toolbar_min_height = max(22, toolbar_font + toolbar_compact * 2 + 8)
+        copy_min_height = max(22, copy_font + copy_compact * 2 + 8)
+        preview_padding = max(0, preview_compact)
+        option_padding_v = max(0, option_compact // 2)
+        option_padding_h = max(2, option_compact + 2)
+        toolbar_padding_v = max(0, toolbar_compact // 2)
+        toolbar_padding_h = max(2, toolbar_compact + 2)
+        copy_padding_v = max(0, copy_compact // 2)
+        copy_padding_h = max(2, copy_compact + 2)
+
         return (
-            f"* {{ font-size: {font_size}px; }}\n"
-            f"QPushButton {{\n    padding: {pad_v}px {pad_h}px;\n    min-height: {min_height}px;\n}}\n"
-            f"QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{\n    min-height: {combo_height}px;\n}}\n"
-            "QAbstractButton {\n    spacing: 2px;\n}\n"
-            "QPlainTextEdit, QTextEdit, QListWidget, QTableWidget {\n    padding: 2px;\n}"
+            f"QToolBar#mainToolbar, QToolBar#mainToolbar QToolButton, QMenu#toolbarMenu {{ font-size: {toolbar_font}px; }}\n"
+            f"QToolBar#mainToolbar QToolButton {{ padding: {toolbar_padding_v}px {toolbar_padding_h}px; min-height: {toolbar_min_height}px; }}\n"
+            f"QWidget#inputOptionRow QLabel, QWidget#templateSelectRow QLabel, "
+            f"QWidget#inputOptionRow QLineEdit, QWidget#inputOptionRow QComboBox, QWidget#inputOptionRow QCheckBox, "
+            f"QWidget#templateSelectRow QComboBox {{ font-size: {option_font}px; }}\n"
+            f"QWidget#inputOptionRow QLineEdit, QWidget#inputOptionRow QComboBox, QWidget#templateSelectRow QComboBox {{ "
+            f"padding: {option_padding_v}px {option_padding_h}px; min-height: {option_min_height}px; }}\n"
+            f"QWidget#copyButtonItem QPushButton, QWidget#copyButtonItem QLabel {{ font-size: {copy_font}px; }}\n"
+            f"QWidget#copyButtonItem QPushButton {{ padding: {copy_padding_v}px {copy_padding_h}px; min-height: {copy_min_height}px; }}\n"
+            f"QTextEdit#previewTextEdit {{ font-size: {preview_font}px; padding: {preview_padding}px; border: none; background: white; }}\n"
+            f"QTextEdit#previewTextEdit:focus {{ border: none; }}\n"
+            f"QTextEdit#previewTextEdit QFrame {{ border: none; }}\n"
+            "QPlainTextEdit, QListWidget, QTableWidget { padding: 2px; }"
         )
 
     def apply_ui_settings(self, settings: dict):
-        merged = self._default_ui_settings()
-        if isinstance(settings, dict):
-            merged.update(settings)
+        """应用界面设置。
+
+        旧版在这里直接调用 QApplication.setStyleSheet，并在同一轮事件里
+        逐个刷新工具栏、选项行、复制按钮、预览框。部分控件已经被
+        deleteLater() 标记但还残留在列表中时，点击“确定”会触发
+        RuntimeError，严重时表现为闪退。
+        
+        现在改为：
+        1. 先规范化设置；
+        2. 只给主窗口设置样式，避免影响正在关闭的设置对话框；
+        3. 逐类控件容错刷新，任何单个控件异常都不会导致主程序退出。
+        """
+        merged = self._normalize_ui_settings(settings)
         self._ui_settings = merged
-        stylesheet = self._build_app_stylesheet(merged.get('font_size', 10), merged.get('button_compactness', '紧凑'))
-        app = QApplication.instance()
-        if app is not None:
-            app.setStyleSheet(stylesheet)
+        stylesheet = self._build_app_stylesheet(merged)
+        try:
+            self.setStyleSheet(stylesheet)
+        except Exception:
+            print('应用主窗口样式失败：')
+            traceback.print_exc()
+        self._apply_runtime_ui_settings()
         return merged
+
+    @staticmethod
+    def _safe_set_font(widget, point_size):
+        if widget is None:
+            return
+        try:
+            font = widget.font() if hasattr(widget, 'font') else QFont()
+            font.setPointSize(int(point_size))
+            widget.setFont(font)
+        except RuntimeError:
+            # 控件可能已经被 Qt 删除，仅跳过，避免设置窗口确认后闪退。
+            return
+        except Exception:
+            return
+
+    @staticmethod
+    def _safe_set_min_height(widget, height):
+        if widget is None:
+            return
+        try:
+            widget.setMinimumHeight(int(height))
+        except RuntimeError:
+            return
+        except Exception:
+            return
+
+    def _apply_runtime_ui_settings(self):
+        settings = self._normalize_ui_settings(getattr(self, '_ui_settings', self._default_ui_settings()))
+
+        toolbar_font_size = settings.get('toolbar_font_size', 10)
+        toolbar_height = max(22, toolbar_font_size + settings.get('toolbar_compactness', 4) * 2 + 8)
+        if hasattr(self, 'main_toolbar'):
+            self._safe_set_font(self.main_toolbar, toolbar_font_size)
+            for button in list(getattr(self, 'toolbar_buttons', []) or []):
+                try:
+                    self._safe_set_font(button, toolbar_font_size)
+                    self._safe_set_min_height(button, toolbar_height)
+                    menu = button.menu() if hasattr(button, 'menu') else None
+                    if menu is not None:
+                        self._safe_set_font(menu, toolbar_font_size)
+                        for action in menu.actions():
+                            action.setFont(menu.font())
+                except RuntimeError:
+                    continue
+                except Exception:
+                    print('应用工具栏样式失败：')
+                    traceback.print_exc()
+
+        try:
+            if hasattr(self, 'template_row') and self.template_row is not None:
+                self.template_row.apply_ui_settings(settings)
+        except RuntimeError:
+            pass
+        except Exception:
+            print('应用模板行样式失败：')
+            traceback.print_exc()
+
+        for row in list(getattr(self, 'option_rows', []) or []):
+            try:
+                if row is not None and hasattr(row, 'apply_ui_settings'):
+                    row.apply_ui_settings(settings)
+            except RuntimeError:
+                continue
+            except Exception:
+                print('应用选项行样式失败：')
+                traceback.print_exc()
+
+        # copy_buttons 正常结构是 [(CopyButtonItem, field_name), ...]。这里兼容
+        # 旧中间版本可能遗留的 [CopyButtonItem, ...]，避免解包异常导致闪退。
+        for entry in list(getattr(self, 'copy_buttons', []) or []):
+            try:
+                item_widget = entry[0] if isinstance(entry, (list, tuple)) else entry
+                if item_widget is not None and hasattr(item_widget, 'apply_ui_settings'):
+                    item_widget.apply_ui_settings(settings)
+            except RuntimeError:
+                continue
+            except Exception:
+                print('应用复制按钮样式失败：')
+                traceback.print_exc()
+
+        if hasattr(self, 'result_text'):
+            try:
+                preview_font_size = settings.get('preview_font_size', 11)
+                preview_padding = settings.get('preview_compactness', 4)
+                self._safe_set_font(self.result_text, preview_font_size)
+                self.result_text.setFrameShape(QFrame.NoFrame)
+                self.result_text.setLineWidth(0)
+                self.result_text.setMidLineWidth(0)
+                self.result_text.setStyleSheet(
+                    'QTextEdit#previewTextEdit {'
+                    f'font-size: {preview_font_size}px; '
+                    f'padding: {preview_padding}px; '
+                    'border: 0px; background: white;'
+                    '} QTextEdit#previewTextEdit:focus { border: 0px; }'
+                )
+                viewport = self.result_text.viewport()
+                if viewport is not None:
+                    viewport.setStyleSheet('border: 0px; background: white;')
+                    viewport.setAutoFillBackground(False)
+            except RuntimeError:
+                pass
+            except Exception:
+                print('应用预览框样式失败：')
+                traceback.print_exc()
 
     def normalize_main_browser_url_input(self):
         normalized = export.get_engine().normalize_url(self.browser_url_edit.text())
@@ -472,155 +1017,220 @@ class PEditor(QMainWindow):
     def init_ui(self):
         self.setWindowTitle(f'PEditor_v{__version__}')
         self._init_window_geometry()
-        central = QWidget()
-        self.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
+        self.create_toolbar()
+        self.create_main_area()
 
-        t_layout = QHBoxLayout()
-        t_layout.addWidget(QLabel('模板:'))
-        self.template_combo = QComboBox()
-        self.template_combo.setMinimumWidth(88)
-        self.template_combo.setMaximumWidth(96)
-        self.template_combo.view().setMinimumWidth(220)
-        self.template_combo.currentTextChanged.connect(self.on_template_changed)
-        t_layout.addWidget(self.template_combo)
+    def _new_toolbar_action(self, menu, text, handler=None, attr_name=None, checkable=False):
+        action = QAction(text, self)
+        action.setCheckable(checkable)
+        if handler is not None:
+            if checkable:
+                action.toggled.connect(handler)
+            else:
+                action.triggered.connect(lambda checked=False, h=handler: h())
+        menu.addAction(action)
+        if attr_name:
+            setattr(self, attr_name, action)
+        return action
 
-        # 在模板操作按钮组中增加“教程”按钮，以便用户查阅使用说明
-        for text, handler in [
-            ('新增', self.new_template),
-            ('重命名', self.rename_template),
-            ('删除', self.delete_template),
-            ('导入', self.import_template),
-            ('导出', self.export_template),
-            ('输入项', self.edit_options),
-            ('工序', self.open_template_editor),
-            ('编辑规则', self.edit_rules),
-            ('浏览器配置', self.open_browser_flow_editor),
-            ('数据库', self.open_data_manager),
-            ('设置', self.open_settings),
-            ('教程', self.open_tutorial),
-            ('日志', self.open_log_viewer),
-        ]:
-            btn = QPushButton(text)
-            btn.clicked.connect(handler)
-            t_layout.addWidget(btn)
-            if text == '新增':
-                self.new_btn = btn
-            elif text == '重命名':
-                self.rename_btn = btn
-            elif text == '删除':
-                self.del_btn = btn
-            elif text == '导入':
-                self.import_btn = btn
-            elif text == '导出':
-                self.export_btn = btn
-            elif text == '输入项':
-                self.edit_opt_btn = btn
-            elif text == '工序':
-                self.edit_field_btn = btn
-            elif text == '编辑规则':
-                self.edit_rule_btn = btn
-            elif text == '浏览器配置':
-                self.browser_cfg_btn = btn
-            elif text == '数据库':
-                self.db_btn = btn
-            elif text == '设置':
-                self.settings_btn = btn
-            elif text == '教程':
-                self.tutorial_btn = btn
-            elif text == '日志':
-                self.log_btn = btn
-        t_layout.addStretch()
-        main_layout.addLayout(t_layout)
+    def _add_toolbar_menu(self, toolbar, title, action_items):
+        tool_btn = QToolButton(self)
+        tool_btn.setObjectName('toolbarMenuButton')
+        tool_btn.setText(title)
+        tool_btn.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(tool_btn)
+        menu.setObjectName('toolbarMenu')
+        for item in action_items:
+            if item is None:
+                menu.addSeparator()
+                continue
+            text, handler, attr_name = item
+            self._new_toolbar_action(menu, text, handler, attr_name)
+        tool_btn.setMenu(menu)
+        toolbar.addWidget(tool_btn)
+        if hasattr(self, 'toolbar_buttons'):
+            self.toolbar_buttons.append(tool_btn)
+        return tool_btn
 
+    def create_toolbar(self):
+        toolbar = QToolBar('工具栏')
+        toolbar.setObjectName('mainToolbar')
+        toolbar.setMovable(False)
+        self.main_toolbar = toolbar
+        self.toolbar_buttons = []
+        self.addToolBar(toolbar)
 
-        browser_bar = QHBoxLayout()
-        browser_bar.addWidget(QLabel('Driver路径:'))
+        # 这些 QLineEdit 只作为浏览器参数的状态载体，必须隐藏；否则会在主界面左上角形成无意义输入框。
         self.browser_driver_edit = QLineEdit()
-        self.browser_driver_edit.setPlaceholderText('chromedriver.exe 路径')
-        self.browser_driver_edit.editingFinished.connect(self.on_main_browser_settings_changed)
-        browser_bar.addWidget(self.browser_driver_edit, 2)
-        browser_bar.addWidget(QLabel('浏览器路径:'))
         self.browser_binary_edit = QLineEdit()
-        self.browser_binary_edit.setPlaceholderText('chrome.exe 路径，可留空')
-        self.browser_binary_edit.editingFinished.connect(self.on_main_browser_settings_changed)
-        browser_bar.addWidget(self.browser_binary_edit, 2)
-        browser_bar.addWidget(QLabel('启动URL:'))
         self.browser_url_edit = QLineEdit()
-        self.browser_url_edit.setPlaceholderText('点击打开浏览器时使用的 URL')
+        for hidden_edit in (self.browser_driver_edit, self.browser_binary_edit, self.browser_url_edit):
+            hidden_edit.hide()
+        self.browser_driver_edit.editingFinished.connect(self.on_main_browser_settings_changed)
+        self.browser_binary_edit.editingFinished.connect(self.on_main_browser_settings_changed)
         self.browser_url_edit.editingFinished.connect(self.normalize_main_browser_url_input)
         self.browser_url_edit.editingFinished.connect(self.on_main_browser_settings_changed)
-        browser_bar.addWidget(self.browser_url_edit, 3)
-        self.open_browser_btn = QPushButton('打开浏览器')
-        self.open_browser_btn.clicked.connect(self.open_browser_from_main)
-        browser_bar.addWidget(self.open_browser_btn)
-        main_layout.addLayout(browser_bar)
 
-        self.input_group = QGroupBox('工艺参数输入')
-        self.input_layout = QGridLayout(self.input_group)
-        self.input_layout.setColumnStretch(1, 1)
-        self.input_layout.setColumnStretch(3, 1)
-        self.input_layout.setColumnStretch(5, 1)
-        main_layout.addWidget(self.input_group)
+        self._add_toolbar_menu(toolbar, '文件', [
+            ('新建模板', self.new_template, 'new_btn'),
+            ('重命名模板', self.rename_template, 'rename_btn'),
+            ('删除模板', self.delete_template, 'del_btn'),
+            None,
+            ('导入模板', self.import_template, 'import_btn'),
+            ('导出模板', self.export_template, 'export_btn'),
+            ('导出工艺TXT', self.save_to_summary_file, 'save_btn'),
+            None,
+            ('退出', self.close, 'exit_btn'),
+        ])
 
-        self.splitter = QSplitter(Qt.Vertical)
-        main_layout.addWidget(self.splitter, 1)
+        self._add_toolbar_menu(toolbar, '编辑', [
+            ('添加选项行', self.add_option_row, 'add_option_row_action'),
+            ('删除选中选项行', self.delete_option_row, 'delete_option_row_action'),
+            ('编辑选中选项名称', self.edit_option_row, 'edit_option_row_action'),
+            None,
+            ('输入项配置', self.edit_options, 'edit_opt_btn'),
+            ('工序模板', self.open_template_editor, 'edit_field_btn'),
+            ('编辑规则', self.edit_rules, 'edit_rule_btn'),
+            ('数据库', self.open_data_manager, 'db_btn'),
+            None,
+            ('清空输入', self.clear_inputs, 'clear_btn'),
+        ])
 
+        self._add_toolbar_menu(toolbar, '浏览器', [
+            ('浏览器参数', self.open_browser_settings_dialog, 'browser_settings_btn'),
+            ('打开浏览器', self.open_browser_from_main, 'open_browser_btn'),
+            ('浏览器配置', self.open_browser_flow_editor, 'browser_cfg_btn'),
+            ('导出至浏览器', self.export_current_to_browser, 'browser_export_btn'),
+        ])
+
+        self.copy_tool_btn = QToolButton(self)
+        self.copy_tool_btn.setObjectName('toolbarMenuButton')
+        self.copy_tool_btn.setText('复制')
+        self.copy_tool_btn.setPopupMode(QToolButton.InstantPopup)
+        copy_menu = QMenu(self.copy_tool_btn)
+        copy_menu.setObjectName('toolbarMenu')
+        self._new_toolbar_action(copy_menu, '添加工序按钮', self.show_add_copy_button_menu, 'add_copy_btn')
+        self._new_toolbar_action(copy_menu, '删除选中按钮', self.delete_selected_copy_button, 'del_copy_btn')
+        self._new_toolbar_action(copy_menu, '前移选中按钮', lambda: self.move_selected_copy_buttons(-1), 'move_copy_left_btn')
+        self._new_toolbar_action(copy_menu, '后移选中按钮', lambda: self.move_selected_copy_buttons(1), 'move_copy_right_btn')
+        copy_menu.addSeparator()
+        self.copy_multi_check = self._new_toolbar_action(copy_menu, '多选复制按钮', self.on_copy_multi_mode_changed, checkable=True)
+        self.copy_tool_btn.setMenu(copy_menu)
+        toolbar.addWidget(self.copy_tool_btn)
+        self.toolbar_buttons.append(self.copy_tool_btn)
+
+        self._add_toolbar_menu(toolbar, '帮助', [
+            ('界面设置', self.open_settings, 'settings_btn'),
+            ('教程', self.open_tutorial, 'tutorial_btn'),
+            ('日志', self.open_log_viewer, 'log_btn'),
+        ])
+
+    def create_main_area(self):
+        splitter1 = QSplitter(Qt.Vertical)
+        splitter2 = QSplitter(Qt.Horizontal)
+        # QSplitter 是 GTE 主界面的拖动分割边框控件，用户可直接拖动边框调整区域大小。
+        splitter1.setHandleWidth(8)
+        splitter2.setHandleWidth(8)
+        splitter1.setChildrenCollapsible(False)
+        splitter2.setChildrenCollapsible(False)
+
+        left_panel = self.create_left_panel()
+        right_panel = self.create_right_panel()
+        down_panel = self.create_down_panel()
+
+        splitter2.addWidget(left_panel)
+        splitter2.addWidget(right_panel)
+        splitter1.addWidget(splitter2)
+        splitter1.addWidget(down_panel)
+        splitter1.setSizes([700, 260])
+        splitter2.setSizes([500, 500])
+        self.setCentralWidget(splitter1)
+        self.splitter = splitter1
+        self.top_splitter = splitter2
+
+    def _make_panel(self, object_name='gtePanel', white=False):
+        panel = QFrame()
+        panel.setObjectName(object_name)
+        color = 'white' if white else 'transparent'
+        panel.setStyleSheet(f'QFrame#{object_name} {{ background-color: {color}; border: 1px solid #999; }}')
+        return panel
+
+    def create_left_panel(self):
+        panel = self._make_panel('gteLeftPanel')
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.input_scroll = QScrollArea()
+        self.input_scroll.setWidgetResizable(True)
+        self.input_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.input_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.input_scroll.setFrameShape(QFrame.NoFrame)
+
+        self.input_scroll_panel = QFrame()
+        self.input_scroll_panel.setFrameShape(QFrame.NoFrame)
+        self.input_layout = QVBoxLayout(self.input_scroll_panel)
+        self.input_layout.setContentsMargins(5, 5, 5, 5)
+        self.input_layout.setSpacing(5)
+
+        self.template_combo = QComboBox()
+        self.template_combo.currentTextChanged.connect(self.on_template_changed)
+        self.template_row = TemplateSelectRow(self.template_combo, self)
+        self.input_layout.addWidget(self.template_row)
+        self.input_layout.addStretch()
+
+        self.input_scroll.setWidget(self.input_scroll_panel)
+        layout.addWidget(self.input_scroll)
+        return panel
+
+    def create_right_panel(self):
+        panel = self._make_panel('gteRightPanel', white=True)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(5)
         self.result_text = QTextEdit()
+        self.result_text.setObjectName('previewTextEdit')
+        self.result_text.setFrameShape(QFrame.NoFrame)
+        self.result_text.setStyleSheet('border: none; background: white;')
         self.result_text.setReadOnly(True)
         self.result_text.setPlaceholderText('工艺段落将实时显示在此...')
-        self.splitter.addWidget(self.result_text)
+        self.result_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        layout.addWidget(self.result_text)
+        return panel
 
-        copy_group = QGroupBox('复制工序内容')
-        copy_main_layout = QVBoxLayout(copy_group)
-        copy_toolbar = QHBoxLayout()
-        self.add_copy_btn = QPushButton('添加工序')
-        self.add_copy_btn.clicked.connect(self.show_add_copy_button_menu)
-        copy_toolbar.addWidget(self.add_copy_btn)
-        self.del_copy_btn = QPushButton('删除选中')
-        self.del_copy_btn.clicked.connect(self.delete_selected_copy_button)
-        copy_toolbar.addWidget(self.del_copy_btn)
-        self.move_copy_left_btn = QPushButton('前移')
-        self.move_copy_left_btn.clicked.connect(lambda: self.move_selected_copy_buttons(-1))
-        copy_toolbar.addWidget(self.move_copy_left_btn)
-        self.move_copy_right_btn = QPushButton('后移')
-        self.move_copy_right_btn.clicked.connect(lambda: self.move_selected_copy_buttons(1))
-        copy_toolbar.addWidget(self.move_copy_right_btn)
-        self.copy_multi_check = QCheckBox('多选')
-        self.copy_multi_check.toggled.connect(self.on_copy_multi_mode_changed)
-        copy_toolbar.addWidget(self.copy_multi_check)
-        copy_toolbar.addStretch()
-        copy_main_layout.addLayout(copy_toolbar)
+    def create_down_panel(self):
+        panel = self._make_panel('gteDownPanel')
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(5)
 
         self.copy_scroll = QScrollArea()
-        self.copy_scroll.setWidgetResizable(True)
-        self.copy_scroll_widget = QWidget()
+        # 复制按钮区需要横向滚动；不让内容容器被强行压缩到视口宽度。
+        self.copy_scroll.setWidgetResizable(False)
+        self.copy_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.copy_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.copy_scroll.setFrameShape(QFrame.NoFrame)
+        self.copy_scroll_widget = QFrame()
+        self.copy_scroll_widget.setFrameShape(QFrame.NoFrame)
+        self.copy_scroll_widget.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
         self.copy_buttons_layout = QHBoxLayout(self.copy_scroll_widget)
+        self.copy_buttons_layout.setContentsMargins(5, 5, 5, 5)
+        self.copy_buttons_layout.setSpacing(6)
         self.copy_buttons_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.copy_scroll.setWidget(self.copy_scroll_widget)
-        copy_main_layout.addWidget(self.copy_scroll)
+        layout.addWidget(self.copy_scroll)
+        return panel
 
-        self.input_group.setMinimumHeight(110)
-        self.result_text.setMinimumHeight(120)
-        copy_group.setMinimumHeight(120)
-        self.splitter.addWidget(copy_group)
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.setSizes([400, 150])
-
-        bottom = QHBoxLayout()
-        self.save_btn = QPushButton('导出工艺文件内容为TXT')
-        self.save_btn.clicked.connect(self.save_to_summary_file)
-        bottom.addWidget(self.save_btn)
-        self.browser_export_btn = QPushButton('导出至浏览器')
-        self.browser_export_btn.clicked.connect(self.export_current_to_browser)
-        bottom.addWidget(self.browser_export_btn)
-        self.clear_btn = QPushButton('清空输入')
-        self.clear_btn.clicked.connect(self.clear_inputs)
-        bottom.addWidget(self.clear_btn)
-        self.exit_btn = QPushButton('退出')
-        self.exit_btn.clicked.connect(self.close)
-        bottom.addWidget(self.exit_btn)
-        main_layout.addLayout(bottom)
+    def open_browser_settings_dialog(self):
+        browser = self._get_browser_settings_for_current_template() if self.current_template_name else BrowserFlowWindow._default_browser()
+        dlg = BrowserSettingsDialog(browser, self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        settings = dlg.get_browser_settings()
+        self.browser_driver_edit.setText(settings.get('chromedriver_path', ''))
+        self.browser_binary_edit.setText(settings.get('chrome_binary', ''))
+        self.browser_url_edit.setText(settings.get('start_url', ''))
+        self.on_main_browser_settings_changed()
 
 
     def _get_browser_flow_for_current_template(self):
@@ -703,9 +1313,7 @@ class PEditor(QMainWindow):
         self.apply_ui_settings(settings)
 
     def save_settings(self, settings):
-        payload = self._default_ui_settings()
-        if isinstance(settings, dict):
-            payload.update(settings)
+        payload = self._normalize_ui_settings(settings)
         try:
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -715,10 +1323,17 @@ class PEditor(QMainWindow):
     def open_settings(self):
         current = dict(getattr(self, '_ui_settings', self._default_ui_settings()))
         dlg = UiSettingsDialog(current, self)
-        if dlg.exec_() == QDialog.Accepted:
-            settings = dlg.get_settings()
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        try:
+            settings = self._normalize_ui_settings(dlg.get_settings())
             self.apply_ui_settings(settings)
             self.save_settings(settings)
+        except Exception as e:
+            # 避免设置窗口确认后异常冒泡导致主程序退出。
+            print('应用界面设置失败：')
+            traceback.print_exc()
+            QMessageBox.critical(self, '界面设置错误', f'应用界面设置失败：{e}')
 
     def open_tutorial(self):
         tutorial_text = ''
@@ -984,34 +1599,33 @@ class PEditor(QMainWindow):
         if before_config != config:
             log_change(f'主模板修改 - {self.current_template_name}', before=before_config, after=config)
 
-    def refresh_input_area(self, preserved_values=None):
-        for w in self.input_widgets:
-            w.deleteLater()
+    def _clear_input_option_rows(self):
+        self.selected_option_row = None
+        for row in list(self.option_rows):
+            self.input_layout.removeWidget(row)
+            row.deleteLater()
+        self.option_rows.clear()
         self.input_widgets.clear()
-        while self.input_layout.count():
-            item = self.input_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+
+    def refresh_input_area(self, preserved_values=None):
+        self._clear_input_option_rows()
         opts = sorted(self.current_options_config, key=lambda x: x.get('order', 0))
-        row = col = 0
         initial_values = dict(preserved_values or {})
         for opt in opts:
-            label = QLabel(opt['label'])
-            self.input_layout.addWidget(label, row, col * 2)
             widget = self._create_widget(opt, initial_values)
-            self.input_layout.addWidget(widget, row, col * 2 + 1)
+            if preserved_values and opt.get('label') in preserved_values:
+                self._set_widget_value(widget, preserved_values.get(opt.get('label')))
+            row = InputOptionRow(opt, widget, self)
+            insert_index = max(1, self.input_layout.count() - 1)
+            self.input_layout.insertWidget(insert_index, row)
+            self.option_rows.append(row)
             self.input_widgets.append(widget)
-            if preserved_values and opt['label'] in preserved_values:
-                self._set_widget_value(widget, preserved_values.get(opt['label']))
-            col += 1
-            if col >= 3:
-                col = 0
-                row += 1
         self.setup_input_change_tracking()
+        self._apply_runtime_ui_settings()
         self.refresh_dynamic_combo_options()
 
     def _create_widget(self, opt, initial_values=None):
-        widget_type = opt['type']
+        widget_type = opt.get('type', 'text')
         if widget_type == 'text':
             return QLineEdit()
         if widget_type in ('combo', 'editable_combo'):
@@ -1029,12 +1643,149 @@ class PEditor(QMainWindow):
 
     def setup_input_change_tracking(self):
         for widget in self.input_widgets:
+            try:
+                widget.disconnect()
+            except Exception:
+                pass
             if isinstance(widget, QLineEdit):
                 widget.textChanged.connect(self.on_input_widget_changed)
             elif isinstance(widget, QComboBox):
                 widget.currentTextChanged.connect(self.on_input_widget_changed)
             elif isinstance(widget, QCheckBox):
                 widget.stateChanged.connect(self.on_input_widget_changed)
+
+    def clear_selected_option_row(self):
+        if self.selected_option_row is not None:
+            self.selected_option_row.set_selected(False)
+        self.selected_option_row = None
+
+    def select_option_row(self, row, toggle=True):
+        if row is None:
+            return
+        if self.selected_option_row is row:
+            if toggle:
+                row.set_selected(False)
+                self.selected_option_row = None
+            else:
+                row.set_selected(True)
+            return
+        if self.selected_option_row is not None:
+            self.selected_option_row.set_selected(False)
+        self.selected_option_row = row
+        self.selected_option_row.set_selected(True)
+
+    def add_option_row(self):
+        if not self.current_template_name:
+            QMessageBox.warning(self, '提示', '请先选择或新建模板。')
+            return
+        base = '新选项'
+        existing = {str(opt.get('label', '')).strip() for opt in self.current_options_config}
+        index = 1
+        name = base
+        while name in existing:
+            index += 1
+            name = f'{base}{index}'
+        preserved = self.collect_input_values()
+        self.current_options_config.append({'label': name, 'type': 'text', 'order': len(self.current_options_config), 'source': {}})
+        self.refresh_input_area(preserved)
+        if self.option_rows:
+            self.select_option_row(self.option_rows[-1], toggle=False)
+        self._save_current_template()
+        self.update_result_text(force=True)
+
+    def delete_option_row(self):
+        if self.selected_option_row is None:
+            QMessageBox.warning(self, '提示', '请先选中一个选项行。')
+            return
+        row = self.selected_option_row
+        label = row.get_name()
+        reply = QMessageBox.question(self, '确认删除', f'确定删除选项“{label}”吗？')
+        if reply != QMessageBox.Yes:
+            return
+        preserved = self.collect_input_values()
+        self.current_options_config = [opt for opt in self.current_options_config if opt is not row.option_config]
+        preserved.pop(label, None)
+        self.refresh_input_area(preserved)
+        self.sync_option_order_from_rows(save=True)
+        self.update_result_text(force=True)
+
+    def edit_option_row(self):
+        if self.selected_option_row is None:
+            QMessageBox.warning(self, '提示', '请先选中一个选项行。')
+            return
+        row = self.selected_option_row
+        old_name = row.get_name()
+        new_name, ok = QInputDialog.getText(self, '编辑选项', '请输入新的选项名称：', text=old_name)
+        if not ok:
+            return
+        new_name = new_name.strip()
+        if not new_name:
+            QMessageBox.warning(self, '提示', '选项名称不能为空。')
+            return
+        if new_name != old_name and any(opt.get('label') == new_name for opt in self.current_options_config):
+            QMessageBox.warning(self, '提示', f'选项“{new_name}”已存在。')
+            return
+        preserved = self.collect_input_values()
+        if old_name in preserved:
+            preserved[new_name] = preserved.pop(old_name)
+        row.set_name(new_name)
+        self.refresh_input_area(preserved)
+        for option_row in self.option_rows:
+            if option_row.get_name() == new_name:
+                self.select_option_row(option_row, toggle=False)
+                break
+        self._save_current_template()
+        self.update_result_text(force=True)
+
+    def find_option_row_at_pos(self, global_pos):
+        widget = QApplication.widgetAt(global_pos)
+        while widget is not None:
+            if isinstance(widget, InputOptionRow):
+                return widget
+            widget = widget.parentWidget()
+        return None
+
+    def move_option_row_by_mouse(self, row, global_pos):
+        target_row = self.find_option_row_at_pos(global_pos)
+        if target_row is None or target_row is row:
+            return
+        row_index = self.input_layout.indexOf(row)
+        target_index = self.input_layout.indexOf(target_row)
+        if row_index < 0 or target_index < 0:
+            return
+        local_pos = target_row.mapFromGlobal(global_pos)
+        if local_pos.y() < target_row.height() / 2:
+            new_index = target_index
+        else:
+            new_index = target_index + 1
+        if row_index < new_index:
+            new_index -= 1
+        max_index = self.input_layout.count() - 2
+        if new_index < 0:
+            new_index = 0
+        if new_index > max_index:
+            new_index = max_index
+        if new_index == row_index:
+            return
+        self.input_layout.removeWidget(row)
+        self.input_layout.insertWidget(new_index, row)
+        self.select_option_row(row, toggle=False)
+
+    def sync_option_order_from_rows(self, save=False):
+        rows = []
+        for index in range(self.input_layout.count()):
+            widget = self.input_layout.itemAt(index).widget()
+            if isinstance(widget, InputOptionRow):
+                rows.append(widget)
+        self.option_rows = rows
+        self.input_widgets = [row.editor for row in rows]
+        self.current_options_config = [row.option_config for row in rows]
+        for order, opt in enumerate(self.current_options_config):
+            opt['order'] = order
+        if save and self.current_template_name:
+            self._save_current_template()
+            self.update_result_text(force=True)
+
 
     def on_input_widget_changed(self, *args):
         if self._updating_option_sources:
@@ -1049,7 +1800,11 @@ class PEditor(QMainWindow):
         self._updating_option_sources = True
         try:
             input_vals = self.collect_input_values()
-            for opt, widget in zip(sorted(self.current_options_config, key=lambda x: x.get('order', 0)), self.input_widgets):
+            if getattr(self, 'option_rows', None):
+                row_iter = [(row.option_config, row.editor) for row in self.option_rows]
+            else:
+                row_iter = list(zip(sorted(self.current_options_config, key=lambda x: x.get('order', 0)), self.input_widgets))
+            for opt, widget in row_iter:
                 if opt.get('type') not in ('combo', 'editable_combo') or not isinstance(widget, QComboBox):
                     continue
                 options = self.data_matcher.get_field_options(opt.get('source', {}), input_values=input_vals)
@@ -1146,14 +1901,20 @@ class PEditor(QMainWindow):
         return result
 
     def _clear_copy_button_widgets(self):
-        for btn, _ in self.copy_buttons:
-            self.copy_button_group.removeButton(btn)
-            btn.deleteLater()
+        for item_widget, _ in self.copy_buttons:
+            internal_button = getattr(item_widget, 'button', item_widget)
+            try:
+                self.copy_button_group.removeButton(internal_button)
+            except Exception:
+                pass
+            item_widget.deleteLater()
         self.copy_buttons.clear()
         while self.copy_buttons_layout.count():
             item = self.copy_buttons_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.copy_scroll_widget.adjustSize()
 
     def _normalize_copy_selected_fields(self, fields=None):
         ordered = []
@@ -1188,22 +1949,85 @@ class PEditor(QMainWindow):
 
     def _apply_copy_button_checked_state(self, fields=None):
         selected = set(self._normalize_copy_selected_fields(fields))
-        for btn, field in self.copy_buttons:
-            old = btn.blockSignals(True)
-            btn.setChecked(field in selected)
-            btn.blockSignals(old)
+        for item_widget, field in self.copy_buttons:
+            old = item_widget.blockSignals(True)
+            item_widget.setChecked(field in selected)
+            item_widget.blockSignals(old)
+
+    def select_copy_item(self, item_widget, toggle=True):
+        if item_widget is None:
+            return
+        field_name = getattr(item_widget, 'field_name', '')
+        if not field_name:
+            return
+        currently_selected = field_name in self._selected_copy_field_names_for_action()
+        multi_enabled = bool(getattr(self, 'copy_multi_check', None) and self.copy_multi_check.isChecked())
+        if multi_enabled:
+            selected = self._selected_copy_field_names_for_action()
+            if currently_selected and toggle:
+                selected = [field for field in selected if field != field_name]
+            elif field_name not in selected:
+                selected.append(field_name)
+            self._copy_selected_fields = selected
+        else:
+            self._copy_selected_fields = [] if currently_selected and toggle else [field_name]
+        self._copy_last_selected_field = self._copy_selected_fields[-1] if self._copy_selected_fields else ''
+        self._apply_copy_button_checked_state(self._copy_selected_fields)
+
+    def find_copy_item_at_pos(self, global_pos):
+        widget = QApplication.widgetAt(global_pos)
+        while widget is not None:
+            if isinstance(widget, CopyButtonItem):
+                return widget
+            widget = widget.parentWidget()
+        return None
+
+    def move_copy_item_by_mouse(self, item_widget, global_pos):
+        target_item = self.find_copy_item_at_pos(global_pos)
+        if target_item is None or target_item is item_widget:
+            return
+        item_index = self.copy_buttons_layout.indexOf(item_widget)
+        target_index = self.copy_buttons_layout.indexOf(target_item)
+        if item_index < 0 or target_index < 0:
+            return
+        local_pos = target_item.mapFromGlobal(global_pos)
+        if local_pos.x() < target_item.width() / 2:
+            new_index = target_index
+        else:
+            new_index = target_index + 1
+        if item_index < new_index:
+            new_index -= 1
+        max_index = self.copy_buttons_layout.count() - 1
+        new_index = max(0, min(new_index, max_index))
+        if new_index == item_index:
+            return
+        self.copy_buttons_layout.removeWidget(item_widget)
+        self.copy_buttons_layout.insertWidget(new_index, item_widget)
+        self.select_copy_item(item_widget, toggle=False)
+        self.sync_copy_order_from_items(save=False)
+
+    def sync_copy_order_from_items(self, save=False):
+        ordered = []
+        known = {item_widget: field for item_widget, field in self.copy_buttons}
+        for index in range(self.copy_buttons_layout.count()):
+            widget = self.copy_buttons_layout.itemAt(index).widget()
+            if isinstance(widget, CopyButtonItem) and widget in known:
+                ordered.append((widget, known[widget]))
+        self.copy_buttons = ordered
+        self.copy_scroll_widget.adjustSize()
+        if save and self.current_template_name:
+            self._save_current_template()
 
     def _rebuild_copy_button_widgets(self, fields, checked_fields=None):
         checked_fields = self._sanitize_copy_button_fields(checked_fields or self._copy_selected_fields)
         self._clear_copy_button_widgets()
         for field_name in self._sanitize_copy_button_fields(fields):
-            btn = QPushButton(field_name)
-            btn.setCheckable(True)
-            btn.setMinimumWidth(80)
-            btn.clicked.connect(lambda checked, b=btn, f=field_name: self.on_copy_button_clicked(b, f, checked))
-            self.copy_buttons_layout.addWidget(btn)
-            self.copy_button_group.addButton(btn)
-            self.copy_buttons.append((btn, field_name))
+            item_widget = CopyButtonItem(field_name, self)
+            self.copy_buttons_layout.addWidget(item_widget)
+            self.copy_button_group.addButton(item_widget.button)
+            self.copy_buttons.append((item_widget, field_name))
+        self.copy_scroll_widget.adjustSize()
+        self._apply_runtime_ui_settings()
         self._apply_copy_button_checked_state(checked_fields)
 
     def get_current_copy_button_fields(self):
@@ -1219,11 +2043,11 @@ class PEditor(QMainWindow):
             return
         main_tpl = self.template_db.get_main_template(self.current_template_name) or {}
         main_cfg = main_tpl.get('config', {}) or {}
-        all_fields = self._get_all_process_field_names()
         raw_fields = main_cfg.get('copy_buttons', []) or []
         clean_fields = self._sanitize_copy_button_fields(raw_fields)
-        missing_fields = [field for field in all_fields if field not in clean_fields]
-        display_fields = clean_fields + missing_fields if clean_fields else all_fields
+        # 复制按钮与字段池隔离：这里只显示主模板中保存的 copy_buttons，
+        # 不再因为字段仍存在于“可用字段”中而自动补回，避免删除后刷新又恢复。
+        display_fields = clean_fields
         restored_selected = self._sanitize_copy_button_fields(previous_selected)
         self._rebuild_copy_button_widgets(display_fields, checked_fields=restored_selected)
         saved_fields = self._sanitize_copy_button_fields(display_fields)
@@ -1308,8 +2132,9 @@ class PEditor(QMainWindow):
             widget = item.widget()
             if widget is not None:
                 widget.setParent(None)
-        for btn, _ in self.copy_buttons:
-            self.copy_buttons_layout.addWidget(btn)
+        for item_widget, _ in self.copy_buttons:
+            self.copy_buttons_layout.addWidget(item_widget)
+        self.copy_scroll_widget.adjustSize()
 
         self._copy_selected_fields = list(selected_fields)
         if selected_fields:
@@ -1321,11 +2146,13 @@ class PEditor(QMainWindow):
     def refresh_copy_button_visibility(self, final_fields=None):
         visible_fields = self._get_visible_copy_button_fields() if self.current_template_name else set()
         if not visible_fields:
-            for btn, _ in self.copy_buttons:
-                btn.setVisible(False)
+            for item_widget, _ in self.copy_buttons:
+                item_widget.setVisible(False)
+            self.copy_scroll_widget.adjustSize()
             return
-        for btn, field in self.copy_buttons:
-            btn.setVisible(field in visible_fields)
+        for item_widget, field in self.copy_buttons:
+            item_widget.setVisible(field in visible_fields)
+        self.copy_scroll_widget.adjustSize()
 
     def show_add_copy_button_menu(self):
         if not self.current_template_name:
@@ -1340,7 +2167,12 @@ class PEditor(QMainWindow):
             action = QAction(field, self)
             action.triggered.connect(lambda checked, f=field: self.add_copy_button_by_field(f))
             menu.addAction(action)
-        menu.exec_(self.add_copy_btn.mapToGlobal(self.add_copy_btn.rect().bottomLeft()))
+        anchor = getattr(self, 'copy_tool_btn', None)
+        if anchor is not None:
+            pos = anchor.mapToGlobal(anchor.rect().bottomLeft())
+        else:
+            pos = self.mapToGlobal(self.rect().center())
+        menu.exec_(pos)
 
     def add_copy_button_by_field(self, field_name):
         field_name = str(field_name or '').strip()
@@ -1396,9 +2228,14 @@ class PEditor(QMainWindow):
 
     def collect_input_values(self):
         input_vals = {}
-        sorted_options = sorted(self.current_options_config, key=lambda x: x.get('order', 0))
-        for opt, widget in zip(sorted_options, self.input_widgets):
-            label = opt['label']
+        if getattr(self, 'option_rows', None):
+            row_iter = [(row.option_config, row.editor) for row in self.option_rows]
+        else:
+            row_iter = list(zip(sorted(self.current_options_config, key=lambda x: x.get('order', 0)), self.input_widgets))
+        for opt, widget in row_iter:
+            label = opt.get('label', '')
+            if not label:
+                continue
             if isinstance(widget, QLineEdit):
                 input_vals[label] = widget.text()
             elif isinstance(widget, QComboBox):

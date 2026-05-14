@@ -9,3 +9,5 @@
 !*.gitignore
 !*.gitattributes
 !PEditor_教程.txt
+!*.spec
+!变量函数关系流程图.md
