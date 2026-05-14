@@ -1,0 +1,11 @@
+# 先忽略所有文件
+/*
+
+
+# 只保留 Python 文件
+!*.py
+
+# 可选：如果你还想保留这些，也可以取消注释用!号
+!*.gitignore
+!*.gitattributes
+!PEditor_教程.txt
