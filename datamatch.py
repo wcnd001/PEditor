@@ -57,7 +57,7 @@ class RuleEditDialog(QDialog):
             "• 输出字段可与现有字段同名，后面的规则输出会覆盖前面的原始值。"
         )
         hint_label.setWordWrap(True)
-        hint_label.setStyleSheet("color: #555; font-size: 13px;")
+        hint_label.setStyleSheet("color: #555;")
         layout.addRow(hint_label)
 
         self.db_table_combo = QComboBox()
@@ -596,35 +596,55 @@ class DataMatcher:
         text = str(value).strip()
         if text == '':
             return Decimal('0')
-        return Decimal(text)
+        try:
+            return Decimal(text)
+        except (InvalidOperation, ValueError):
+            raise ValueError(f'无法转换为数字：{text}')
+
+    @staticmethod
+    def _numeric_fallback(value):
+        text = '' if value is None else str(value).strip()
+        return '' if text == '' else text
 
     @classmethod
     def _safe_int(cls, value=0):
-        return int(float(cls._convert_expression_value(value) or 0))
+        try:
+            return int(float(cls._convert_expression_value(value) or 0))
+        except Exception:
+            return cls._numeric_fallback(value)
 
     @classmethod
     def _safe_float(cls, value=0):
-        return float(cls._convert_expression_value(value) or 0)
+        try:
+            return float(cls._convert_expression_value(value) or 0)
+        except Exception:
+            return cls._numeric_fallback(value)
 
     @classmethod
     def _safe_round(cls, value, ndigits=0):
-        number = cls._to_decimal(value)
-        ndigits = int(cls._safe_int(ndigits))
-        quant = Decimal('1').scaleb(-ndigits)
-        result = number.quantize(quant, rounding=ROUND_HALF_UP)
-        if ndigits <= 0 and result == result.to_integral_value():
-            return int(result)
-        return float(result)
+        try:
+            number = cls._to_decimal(value)
+            ndigits = int(cls._safe_int(ndigits) or 0)
+            quant = Decimal('1').scaleb(-ndigits)
+            result = number.quantize(quant, rounding=ROUND_HALF_UP)
+            if ndigits <= 0 and result == result.to_integral_value():
+                return int(result)
+            return float(result)
+        except Exception:
+            return cls._numeric_fallback(value)
 
     @classmethod
     def _safe_roundup(cls, value, ndigits=0):
-        number = cls._to_decimal(value)
-        ndigits = int(cls._safe_int(ndigits))
-        quant = Decimal('1').scaleb(-ndigits)
-        result = number.quantize(quant, rounding=ROUND_UP)
-        if ndigits <= 0 and result == result.to_integral_value():
-            return int(result)
-        return float(result)
+        try:
+            number = cls._to_decimal(value)
+            ndigits = int(cls._safe_int(ndigits) or 0)
+            quant = Decimal('1').scaleb(-ndigits)
+            result = number.quantize(quant, rounding=ROUND_UP)
+            if ndigits <= 0 and result == result.to_integral_value():
+                return int(result)
+            return float(result)
+        except Exception:
+            return cls._numeric_fallback(value)
 
     @staticmethod
     def _safe_iif(condition, true_value, false_value):

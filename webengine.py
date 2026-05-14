@@ -998,24 +998,35 @@ class BrowserEngine:
         return self.driver.execute_script(script)
 
     @staticmethod
+    def _numeric_fallback(value):
+        text = '' if value is None else str(value).strip()
+        return '' if text == '' else text
+
+    @staticmethod
     def _safe_round_half_up(value, ndigits=0):
-        number = Decimal(str(value or 0))
-        ndigits = int(float(ndigits or 0))
-        quant = Decimal('1').scaleb(-ndigits)
-        result = number.quantize(quant, rounding=ROUND_HALF_UP)
-        if ndigits <= 0 and result == result.to_integral_value():
-            return int(result)
-        return float(result)
+        try:
+            number = Decimal(str(value or 0))
+            ndigits = int(float(ndigits or 0))
+            quant = Decimal('1').scaleb(-ndigits)
+            result = number.quantize(quant, rounding=ROUND_HALF_UP)
+            if ndigits <= 0 and result == result.to_integral_value():
+                return int(result)
+            return float(result)
+        except Exception:
+            return BrowserEngine._numeric_fallback(value)
 
     @staticmethod
     def _safe_roundup(value, ndigits=0):
-        number = Decimal(str(value or 0))
-        ndigits = int(float(ndigits or 0))
-        quant = Decimal('1').scaleb(-ndigits)
-        result = number.quantize(quant, rounding=ROUND_UP)
-        if ndigits <= 0 and result == result.to_integral_value():
-            return int(result)
-        return float(result)
+        try:
+            number = Decimal(str(value or 0))
+            ndigits = int(float(ndigits or 0))
+            quant = Decimal('1').scaleb(-ndigits)
+            result = number.quantize(quant, rounding=ROUND_UP)
+            if ndigits <= 0 and result == result.to_integral_value():
+                return int(result)
+            return float(result)
+        except Exception:
+            return BrowserEngine._numeric_fallback(value)
 
     @staticmethod
     def _safe_isblank(value):

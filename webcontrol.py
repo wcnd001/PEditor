@@ -1,6 +1,6 @@
 import json
 from log import log_change
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QEvent, QSize
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -21,11 +21,140 @@ from PyQt5.QtWidgets import (
     QPlainTextEdit,
     QSpinBox,
     QSplitter,
+    QScrollArea,
+    QFrame,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
+    QStyle,
+    QApplication,
 )
+
+from PyQt5.QtGui import QFontMetrics, QPalette
+
+
+# 浏览器流程“步骤编辑”表单的最小稳定布局宽度。窗口缩得过窄时不再继续压缩标签/输入框，避免长内容反复重排。
+step_editor_min_layout_width = 520
+
+
+def _wrap_text_flags():
+    flags = Qt.TextWordWrap
+    try:
+        flags = flags | Qt.TextWrapAnywhere
+    except Exception:
+        pass
+    return flags
+
+
+class ComboWordWrapDelegate(QStyledItemDelegate):
+    def _text_width(self, option):
+        parent = self.parent()
+        width = 0
+        try:
+            width = int(parent.property('_pe_wrap_width') or 0)
+        except Exception:
+            width = 0
+        if width <= 0:
+            try:
+                width = int(parent.viewport().width())
+            except Exception:
+                width = 0
+        if width <= 0:
+            try:
+                width = int(parent.width())
+            except Exception:
+                width = 0
+        if width <= 0:
+            try:
+                width = int(option.rect.width())
+            except Exception:
+                width = 0
+        return max(80, int(width) - 12)
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = str(index.data(Qt.DisplayRole) or '')
+        opt.textElideMode = Qt.ElideNone
+        try:
+            opt.features = opt.features | QStyleOptionViewItem.WrapText
+        except Exception:
+            pass
+        style = opt.widget.style() if opt.widget is not None else QApplication.style()
+        text_rect = style.subElementRect(QStyle.SE_ItemViewItemText, opt, opt.widget)
+        opt.text = ''
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+        text_rect.adjust(2, 2, -2, -2)
+        painter.save()
+        try:
+            painter.setFont(opt.font)
+            role = QPalette.HighlightedText if opt.state & QStyle.State_Selected else QPalette.Text
+            painter.setPen(opt.palette.color(role))
+            painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter | _wrap_text_flags(), text)
+        finally:
+            painter.restore()
+
+    def sizeHint(self, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = str(index.data(Qt.DisplayRole) or '')
+        metrics = QFontMetrics(opt.font)
+        width = self._text_width(option)
+        try:
+            rect = metrics.boundingRect(0, 0, width, 10000, _wrap_text_flags(), text)
+            height = rect.height() + 8
+        except Exception:
+            height = metrics.lineSpacing() + 8
+        base = super().sizeHint(option, index)
+        return QSize(int(width), max(base.height(), int(height)))
+
+
+def configure_combo_word_wrap(combo: QComboBox, wrap_width=None):
+    if not isinstance(combo, QComboBox):
+        return
+    try:
+        if wrap_width is None:
+            wrap_width = max(80, int(combo.width()) - 34)
+        wrap_width = max(80, int(wrap_width))
+    except Exception:
+        wrap_width = 120
+    try:
+        combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        combo.setProperty('_pe_wrap_width', wrap_width)
+    except Exception:
+        pass
+    try:
+        view = combo.view()
+        view.setProperty('_pe_wrap_width', wrap_width)
+        if hasattr(view, 'setWordWrap'):
+            view.setWordWrap(True)
+        if hasattr(view, 'setTextElideMode'):
+            view.setTextElideMode(Qt.ElideNone)
+        if hasattr(view, 'setUniformItemSizes'):
+            view.setUniformItemSizes(False)
+        try:
+            view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        except Exception:
+            pass
+        view.setFont(combo.font())
+        if not isinstance(view.itemDelegate(), ComboWordWrapDelegate):
+            view.setItemDelegate(ComboWordWrapDelegate(view))
+        try:
+            popup_width = max(100, int(combo.width() or 0), wrap_width + 12)
+            view.setMinimumWidth(popup_width)
+            view.setMaximumWidth(popup_width)
+        except Exception:
+            view.setMinimumWidth(max(100, wrap_width + 12))
+        try:
+            view.doItemsLayout()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
 
 ACTION_CLICK = '点击元素'
 ACTION_INPUT = '输入文本'
@@ -103,6 +232,7 @@ class BrowserFlowWindow(QMainWindow):
         self.engine = engine
         self.flow_config = {}
         self._loading_step = False
+        self._updating_step_form_widths = False
         self._loaded_signature = ''
         self.recorded_element = None
         self.record_timer = QTimer(self)
@@ -213,9 +343,23 @@ class BrowserFlowWindow(QMainWindow):
         editor_panel = QWidget()
         editor_panel.setMinimumWidth(420)
         editor_layout = QVBoxLayout(editor_panel)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.step_scroll = QScrollArea()
+        self.step_scroll.setWidgetResizable(True)
+        self.step_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.step_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.step_scroll.setFrameShape(QFrame.NoFrame)
+        self.step_scroll_panel = QWidget()
+        step_scroll_layout = QVBoxLayout(self.step_scroll_panel)
+        step_scroll_layout.setContentsMargins(5, 5, 5, 5)
+        step_scroll_layout.setSpacing(5)
 
         editor_group = QGroupBox('步骤编辑')
         self.step_form = QFormLayout(editor_group)
+        self.step_form.setRowWrapPolicy(QFormLayout.DontWrapRows)
+        self.step_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.step_form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
         form = self.step_form
         self.step_name_edit = QLineEdit()
         self.step_condition_edit = QLineEdit()
@@ -345,7 +489,15 @@ class BrowserFlowWindow(QMainWindow):
         form.addRow(self.clear_before_input_check)
         form.addRow(self.wait_clickable_check)
         form.addRow('备注:', self.note_edit)
-        editor_layout.addWidget(editor_group)
+        step_scroll_layout.addWidget(editor_group)
+        step_scroll_layout.addStretch()
+        self.step_scroll.setWidget(self.step_scroll_panel)
+        try:
+            self.step_scroll.viewport().installEventFilter(self)
+            self.step_scroll.installEventFilter(self)
+        except Exception:
+            pass
+        editor_layout.addWidget(self.step_scroll, 2)
 
         self.log_text = QPlainTextEdit()
         self.log_text.setReadOnly(True)
@@ -379,6 +531,7 @@ class BrowserFlowWindow(QMainWindow):
         splitter.addWidget(elements_panel)
         splitter.setSizes([300, 520, 420])
         self.update_action_visibility(self.action_combo.currentText())
+        self._update_step_form_widths()
 
 
     def _set_form_row_visible(self, field_widget, visible):
@@ -386,6 +539,112 @@ class BrowserFlowWindow(QMainWindow):
         if label is not None:
             label.setVisible(visible)
         field_widget.setVisible(visible)
+
+
+    def _schedule_step_form_width_update(self):
+        if getattr(self, '_step_form_width_update_pending', False):
+            return
+        self._step_form_width_update_pending = True
+
+        def run_update():
+            self._step_form_width_update_pending = False
+            self._update_step_form_widths()
+
+        QTimer.singleShot(20, run_update)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        try:
+            self._schedule_step_form_width_update()
+        except Exception:
+            pass
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Resize:
+            try:
+                if watched in (self.step_scroll, self.step_scroll.viewport()):
+                    self._schedule_step_form_width_update()
+            except Exception:
+                pass
+        return super().eventFilter(watched, event)
+
+    def _update_step_form_widths(self):
+        if not hasattr(self, 'step_form') or getattr(self, '_updating_step_form_widths', False):
+            return
+        self._updating_step_form_widths = True
+        try:
+            try:
+                viewport_width = self.step_scroll.viewport().width() if hasattr(self, 'step_scroll') else self.width()
+            except Exception:
+                viewport_width = self.width()
+            effective_width = max(int(step_editor_min_layout_width), int(viewport_width or 0))
+            try:
+                if hasattr(self, 'step_scroll_panel') and effective_width > 0:
+                    self.step_scroll_panel.setMinimumWidth(0)
+                    self.step_scroll_panel.setMaximumWidth(16777215)
+                    self.step_scroll_panel.setFixedWidth(int(effective_width))
+            except Exception:
+                pass
+            available_width = max(220, int(effective_width) - 30)
+            label_max_width = max(120, available_width // 3)
+            try:
+                self.step_form.setRowWrapPolicy(QFormLayout.DontWrapRows)
+                self.step_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.step_form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+            except Exception:
+                pass
+            natural_widths = []
+            for row in range(self.step_form.rowCount()):
+                label_item = self.step_form.itemAt(row, QFormLayout.LabelRole)
+                label_widget = label_item.widget() if label_item is not None else None
+                if label_widget is not None:
+                    try:
+                        text = label_widget.text() if hasattr(label_widget, 'text') else ''
+                        metrics = label_widget.fontMetrics()
+                        try:
+                            natural_widths.append(metrics.horizontalAdvance(text) + 20)
+                        except AttributeError:
+                            natural_widths.append(metrics.width(text) + 20)
+                    except Exception:
+                        pass
+            shared_label_width = min(label_max_width, max([96] + natural_widths))
+            for row in range(self.step_form.rowCount()):
+                label_item = self.step_form.itemAt(row, QFormLayout.LabelRole)
+                field_item = self.step_form.itemAt(row, QFormLayout.FieldRole)
+                label_widget = label_item.widget() if label_item is not None else None
+                field_widget = field_item.widget() if field_item is not None else None
+                label_width = shared_label_width
+                if label_widget is not None:
+                    try:
+                        label_widget.setMinimumWidth(0)
+                        label_widget.setMaximumWidth(16777215)
+                        text = label_widget.text() if hasattr(label_widget, 'text') else ''
+                        metrics = label_widget.fontMetrics()
+                        try:
+                            natural = metrics.horizontalAdvance(text) + 20
+                        except AttributeError:
+                            natural = metrics.width(text) + 20
+                        label_widget.setFixedWidth(int(label_width))
+                        if hasattr(label_widget, 'setWordWrap'):
+                            label_widget.setWordWrap(natural > label_max_width)
+                        if hasattr(label_widget, 'setAlignment'):
+                            label_widget.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    except Exception:
+                        pass
+                if field_widget is not None:
+                    try:
+                        field_widget.setMinimumWidth(0)
+                        field_widget.setMaximumWidth(16777215)
+                        field_width = max(140, available_width - int(label_width) - 28)
+                        field_widget.setFixedWidth(field_width)
+                        if isinstance(field_widget, QComboBox):
+                            configure_combo_word_wrap(field_widget, wrap_width=max(80, field_width - 34))
+                        if field_widget in (getattr(self, 'value_template_edit', None), getattr(self, 'note_edit', None)):
+                            field_widget.setMinimumHeight(90)
+                    except Exception:
+                        pass
+        finally:
+            self._updating_step_form_widths = False
 
 
     def log(self, message):
