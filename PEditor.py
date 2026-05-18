@@ -25,7 +25,7 @@ from utils import resource_path
 from log import LogViewerDialog, log_change
 from gui_helpers import signal_blocked, wrap_text_flags as _wrap_text_flags
 
-__version__ = '3.0'
+__version__ = '3.1'
 # 主界面输入区的最小布局宽度。左侧分割区域小于此值时，行内控件按该宽度稳定布局，避免长文本反复重排导致卡顿。
 input_option_min_layout_width = 360
 # 打包命令：pyinstaller --clean PEditor.spec --distpath "D:\Microsoft Visual Studio\code"
@@ -787,7 +787,7 @@ class InputOptionRow(QWidget):
         self.row_layout.setContentsMargins(3, 3, 3, 3)
         self.row_layout.setSpacing(4)
 
-        self.handle = QLabel('☰')
+        self.handle = QLabel('•••')
         self.handle.setObjectName('inputOptionHandle')
         self.handle.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.handle.setCursor(Qt.SizeAllCursor)
@@ -1200,7 +1200,7 @@ class TemplateSelectRow(QWidget):
 
 
 class CopyButtonItem(QWidget):
-    """下方复制按钮区的 GTE 风格横向滚动项目：上方拖动柄，下方按钮。"""
+    """下方复制按钮区的 GTE 风格项目：上方小拖动柄，下方按钮。"""
 
     def __init__(self, field_name: str, main_window, parent=None):
         super().__init__(parent)
@@ -1212,12 +1212,13 @@ class CopyButtonItem(QWidget):
         self.drag_start_x = None
         self.mouse_dragging = False
         self._adaptive_updating = False
+        self._hidden_by_filter = False
 
         self.item_layout = QVBoxLayout(self)
         self.item_layout.setContentsMargins(4, 4, 4, 4)
         self.item_layout.setSpacing(3)
 
-        self.handle = QLabel('☰')
+        self.handle = QLabel('•••')
         self.handle.setObjectName('copyButtonHandle')
         self.handle.setAlignment(Qt.AlignCenter)
         self.handle.setCursor(Qt.SizeAllCursor)
@@ -1253,27 +1254,22 @@ class CopyButtonItem(QWidget):
             self.button.setFont(font)
             self.handle.setFont(font)
             margin_left, margin_top, margin_right, margin_bottom = self.item_layout.getContentsMargins()
-            available_scroll_width = 0
-            try:
-                available_scroll_width = self.main_window.copy_scroll.viewport().width()
-            except Exception:
-                available_scroll_width = 0
-            max_width = max(copy_font_size * 10, min(max(180, copy_font_size * 16), max(160, available_scroll_width // 4 if available_scroll_width else 220)))
-            min_width = max(92, copy_font_size * 7)
-            raw_width = adaptive_text_width(font, self.field_name, copy_compact, min_width=min_width, max_width=max_width)
-            button_width = max(min_width, min(max_width, raw_width))
-            inner_text_width = max(24, button_width - copy_compact * 2 - 20)
-            wrapped_text = wrap_text_by_width(self.field_name, font, inner_text_width, max_lines=3)
-            if self.button.text() != wrapped_text:
-                self.button.setText(wrapped_text)
-            line_count = max(1, wrapped_text.count('\n') + 1)
-            handle_height = adaptive_control_height(font, copy_compact, min_height=18)
-            button_height = adaptive_control_height(font, copy_compact, min_height=24, lines=line_count)
+            # 复制按钮文字不再插入换行，按钮宽度直接按完整文字宽度自适应。
+            if self.button.text() != self.field_name:
+                self.button.setText(self.field_name)
+            button_width = text_width_for(font, self.field_name) + copy_compact * 2 + 28
+            button_width = max(24, int(button_width))
+            # 拖动柄只作为排序标记使用，保持很小高度，避免挤占复制按钮区纵向空间。
+            handle_height = max(8, min(12, int(copy_compact) + 8))
+            button_height = adaptive_control_height(font, copy_compact, min_height=24, lines=1)
+            handle_font = QFont(font)
+            handle_font.setPointSize(max(6, min(copy_font_size, 8)))
+            self.handle.setFont(handle_font)
             self.handle.setFixedHeight(handle_height)
-            self.handle.setMinimumWidth(button_width)
+            self.handle.setFixedWidth(button_width)
             self.button.setFixedWidth(button_width)
             self.button.setMinimumHeight(button_height)
-            self.button.setMaximumHeight(16777215)
+            self.button.setMaximumHeight(button_height)
             total_width = button_width + margin_left + margin_right
             total_height = handle_height + button_height + self.item_layout.spacing() + margin_top + margin_bottom
             self.setMinimumSize(total_width, total_height)
@@ -1814,6 +1810,11 @@ class PEditor(QMainWindow):
                 print('应用复制按钮样式失败：')
                 traceback.print_exc()
 
+        try:
+            self._relayout_copy_buttons()
+        except Exception:
+            pass
+
         if hasattr(self, 'result_text'):
             try:
                 preview_font_size = scaled_point_size(settings, 'preview_font_size', 11)
@@ -1913,11 +1914,15 @@ class PEditor(QMainWindow):
                 continue
             except Exception:
                 continue
+        try:
+            self._relayout_copy_buttons()
+        except Exception:
+            pass
 
     def eventFilter(self, watched, event):
         if event.type() == QEvent.Resize:
             try:
-                watched_targets = (self.input_scroll, self.input_scroll.viewport(), self.copy_scroll.viewport())
+                watched_targets = (self.input_scroll, self.input_scroll.viewport(), self.copy_scroll, self.copy_scroll.viewport())
                 if watched in watched_targets:
                     self._schedule_refresh_main_adaptive_rows()
             except Exception:
@@ -2257,18 +2262,20 @@ class PEditor(QMainWindow):
         layout.setSpacing(5)
 
         self.copy_scroll = QScrollArea()
-        # 复制按钮区需要横向滚动；不让内容容器被强行压缩到视口宽度。
-        self.copy_scroll.setWidgetResizable(False)
-        self.copy_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.copy_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        # 复制按钮区按视口宽度自动换行，横向滚动关闭，超出高度时使用纵向滚动查看。
+        self.copy_scroll.setWidgetResizable(True)
+        self.copy_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.copy_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.copy_scroll.setFrameShape(QFrame.NoFrame)
         self.copy_scroll_widget = QFrame()
         self.copy_scroll_widget.setFrameShape(QFrame.NoFrame)
-        self.copy_scroll_widget.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
-        self.copy_buttons_layout = QHBoxLayout(self.copy_scroll_widget)
+        self.copy_scroll_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        # 外层用纵向行容器，每一行内部单独横向排列，避免 QGridLayout 造成上下行列宽对齐。
+        self.copy_buttons_layout = QVBoxLayout(self.copy_scroll_widget)
         self.copy_buttons_layout.setContentsMargins(5, 5, 5, 5)
         self.copy_buttons_layout.setSpacing(6)
         self.copy_buttons_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self._copy_row_widgets = []
         self.copy_scroll.setWidget(self.copy_scroll_widget)
         try:
             self.copy_scroll.viewport().installEventFilter(self)
@@ -3071,21 +3078,118 @@ class PEditor(QMainWindow):
             result.append(name)
         return result
 
+    def _detach_copy_items_for_relayout(self):
+        """重排行容器前先把复制项安全临时移回滚动面板，避免变成顶层小窗口。"""
+        parent = getattr(self, 'copy_scroll_widget', None)
+        for item_widget, _ in list(getattr(self, 'copy_buttons', []) or []):
+            try:
+                item_widget.hide()
+                if parent is not None:
+                    item_widget.setParent(parent)
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+
+    def _clear_copy_row_widgets(self, detach_items=True):
+        """清理自动换行产生的行容器。detach_items=True 时保留 CopyButtonItem 本体。"""
+        if not hasattr(self, 'copy_buttons_layout'):
+            return
+        if detach_items:
+            self._detach_copy_items_for_relayout()
+        while self.copy_buttons_layout.count():
+            layout_item = self.copy_buttons_layout.takeAt(0)
+            row_widget = layout_item.widget() if layout_item is not None else None
+            if row_widget is not None:
+                try:
+                    row_widget.hide()
+                    row_widget.deleteLater()
+                except Exception:
+                    pass
+        self._copy_row_widgets = []
+
     def _clear_copy_button_widgets(self):
-        for item_widget, _ in self.copy_buttons:
+        old_widgets = [item_widget for item_widget, _ in self.copy_buttons]
+        self._clear_copy_row_widgets(detach_items=True)
+        for item_widget in old_widgets:
             internal_button = getattr(item_widget, 'button', item_widget)
             try:
                 self.copy_button_group.removeButton(internal_button)
             except Exception:
                 pass
-            item_widget.deleteLater()
+            try:
+                item_widget.hide()
+                item_widget.deleteLater()
+            except Exception:
+                pass
         self.copy_buttons.clear()
-        while self.copy_buttons_layout.count():
-            item = self.copy_buttons_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        self.copy_scroll_widget.adjustSize()
+
+    def _copy_item_width(self, item_widget):
+        try:
+            width = item_widget.sizeHint().width()
+        except Exception:
+            width = 0
+        try:
+            width = max(width, item_widget.minimumWidth())
+        except Exception:
+            pass
+        try:
+            width = max(width, item_widget.width())
+        except Exception:
+            pass
+        return max(1, int(width or 1))
+
+    def _make_copy_row_widget(self):
+        row_widget = QWidget(self.copy_scroll_widget)
+        row_widget.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        try:
+            row_layout.setSpacing(max(0, int(self.copy_buttons_layout.spacing())))
+        except Exception:
+            row_layout.setSpacing(6)
+        row_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.copy_buttons_layout.addWidget(row_widget, 0, Qt.AlignLeft | Qt.AlignTop)
+        self._copy_row_widgets.append(row_widget)
+        return row_widget, row_layout
+
+    def _relayout_copy_buttons(self):
+        """按复制区当前宽度把按钮重排为多行；每行单独横向排列，不做列对齐。"""
+        if not hasattr(self, 'copy_buttons_layout') or getattr(self, '_copy_relayouting', False):
+            return
+        self._copy_relayouting = True
+        try:
+            visible_entries = [(item_widget, field) for item_widget, field in self.copy_buttons if not getattr(item_widget, '_hidden_by_filter', False)]
+            self._clear_copy_row_widgets(detach_items=True)
+            try:
+                viewport_width = int(self.copy_scroll.viewport().width())
+            except Exception:
+                viewport_width = 0
+            left, top, right, bottom = self.copy_buttons_layout.getContentsMargins()
+            spacing = max(0, int(self.copy_buttons_layout.spacing()))
+            available_width = max(80, viewport_width - left - right - 4) if viewport_width > 0 else 600
+            row_layout = None
+            used_width = 0
+            for item_widget, _ in visible_entries:
+                item_width = self._copy_item_width(item_widget)
+                next_width = item_width if row_layout is None or row_layout.count() == 0 else used_width + spacing + item_width
+                if row_layout is None or (row_layout.count() > 0 and next_width > available_width):
+                    _, row_layout = self._make_copy_row_widget()
+                    used_width = 0
+                row_layout.addWidget(item_widget, 0, Qt.AlignLeft | Qt.AlignTop)
+                item_widget.show()
+                used_width = item_width if used_width == 0 else used_width + spacing + item_width
+            try:
+                self.copy_scroll_widget.setMinimumWidth(0)
+                self.copy_scroll_widget.setMaximumWidth(16777215)
+                self.copy_buttons_layout.activate()
+                content_height = self.copy_buttons_layout.sizeHint().height() + top + bottom
+                self.copy_scroll_widget.setMinimumHeight(max(1, int(content_height)))
+                self.copy_scroll_widget.updateGeometry()
+            except Exception:
+                pass
+        finally:
+            self._copy_relayouting = False
 
     def _normalize_copy_selected_fields(self, fields=None):
         ordered = []
@@ -3156,35 +3260,25 @@ class PEditor(QMainWindow):
         target_item = self.find_copy_item_at_pos(global_pos)
         if target_item is None or target_item is item_widget:
             return
-        item_index = self.copy_buttons_layout.indexOf(item_widget)
-        target_index = self.copy_buttons_layout.indexOf(target_item)
+        item_index = next((i for i, (widget, _) in enumerate(self.copy_buttons) if widget is item_widget), -1)
+        target_index = next((i for i, (widget, _) in enumerate(self.copy_buttons) if widget is target_item), -1)
         if item_index < 0 or target_index < 0:
             return
         local_pos = target_item.mapFromGlobal(global_pos)
-        if local_pos.x() < target_item.width() / 2:
-            new_index = target_index
-        else:
-            new_index = target_index + 1
+        new_index = target_index if local_pos.x() < target_item.width() / 2 else target_index + 1
+        moving = self.copy_buttons.pop(item_index)
         if item_index < new_index:
             new_index -= 1
-        max_index = self.copy_buttons_layout.count() - 1
-        new_index = max(0, min(new_index, max_index))
+        new_index = max(0, min(new_index, len(self.copy_buttons)))
         if new_index == item_index:
+            self.copy_buttons.insert(item_index, moving)
             return
-        self.copy_buttons_layout.removeWidget(item_widget)
-        self.copy_buttons_layout.insertWidget(new_index, item_widget)
+        self.copy_buttons.insert(new_index, moving)
         self.select_copy_item(item_widget, toggle=False)
         self.sync_copy_order_from_items(save=False)
 
     def sync_copy_order_from_items(self, save=False):
-        ordered = []
-        known = {item_widget: field for item_widget, field in self.copy_buttons}
-        for index in range(self.copy_buttons_layout.count()):
-            widget = self.copy_buttons_layout.itemAt(index).widget()
-            if isinstance(widget, CopyButtonItem) and widget in known:
-                ordered.append((widget, known[widget]))
-        self.copy_buttons = ordered
-        self.copy_scroll_widget.adjustSize()
+        self._relayout_copy_buttons()
         if save and self.current_template_name:
             preserved = self._remember_input_values()
             self._save_current_template()
@@ -3195,10 +3289,9 @@ class PEditor(QMainWindow):
         self._clear_copy_button_widgets()
         for field_name in self._sanitize_copy_button_fields(fields):
             item_widget = CopyButtonItem(field_name, self)
-            self.copy_buttons_layout.addWidget(item_widget)
             self.copy_button_group.addButton(item_widget.button)
             self.copy_buttons.append((item_widget, field_name))
-        self.copy_scroll_widget.adjustSize()
+        self._relayout_copy_buttons()
         self._apply_runtime_ui_settings()
         self._apply_copy_button_checked_state(checked_fields)
 
@@ -3299,14 +3392,7 @@ class PEditor(QMainWindow):
             return
 
         self.copy_buttons = items
-        while self.copy_buttons_layout.count():
-            item = self.copy_buttons_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-        for item_widget, _ in self.copy_buttons:
-            self.copy_buttons_layout.addWidget(item_widget)
-        self.copy_scroll_widget.adjustSize()
+        self._relayout_copy_buttons()
 
         self._copy_selected_fields = list(selected_fields)
         if selected_fields:
@@ -3321,12 +3407,15 @@ class PEditor(QMainWindow):
         visible_fields = self._get_visible_copy_button_fields() if self.current_template_name else set()
         if not visible_fields:
             for item_widget, _ in self.copy_buttons:
-                item_widget.setVisible(False)
-            self.copy_scroll_widget.adjustSize()
+                item_widget._hidden_by_filter = True
+                item_widget.hide()
+            self._relayout_copy_buttons()
             return
         for item_widget, field in self.copy_buttons:
-            item_widget.setVisible(field in visible_fields)
-        self.copy_scroll_widget.adjustSize()
+            item_widget._hidden_by_filter = field not in visible_fields
+            if item_widget._hidden_by_filter:
+                item_widget.hide()
+        self._relayout_copy_buttons()
 
     def show_add_copy_button_menu(self):
         if not self.current_template_name:

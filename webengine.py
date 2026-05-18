@@ -375,19 +375,105 @@ class BrowserEngine:
         retry_keywords = ('stale', 'not attached', 'other element would receive', 'intercept', 'not clickable', 'detached')
         return isinstance(error, (StaleElementReferenceException, WebDriverException)) or any(keyword in text for keyword in retry_keywords)
 
+    def _wait_for_click_candidate(self, locator_type: str, locator_value: str, timeout: float = 10):
+        """等待并优先返回真正可见、可用的点击目标。
+
+        有些弹出小窗口会有多个 <a> 或隐藏按钮，Selenium 的
+        element_to_be_clickable 只检查第一个匹配元素，容易选到隐藏/未激活项。
+        这里改为从全部匹配元素里选择当前可见且可用的候选项。
+        """
+        by = self._locator_to_by(locator_type)
+
+        def condition(driver):
+            try:
+                elements = driver.find_elements(by, locator_value)
+            except Exception:
+                return False
+            fallback = None
+            for element in elements:
+                try:
+                    if fallback is None:
+                        fallback = element
+                    if element.is_displayed() and element.is_enabled():
+                        return element
+                except StaleElementReferenceException:
+                    continue
+                except Exception:
+                    continue
+            return fallback if fallback is not None else False
+
+        return WebDriverWait(self.driver, timeout).until(condition)
+
+    @staticmethod
+    def _element_center_is_covered(driver, element) -> bool:
+        try:
+            return bool(driver.execute_script(
+                "var el=arguments[0], r=el.getBoundingClientRect();"
+                "var x=r.left+r.width/2, y=r.top+r.height/2;"
+                "var top=document.elementFromPoint(x,y);"
+                "return !!(top && top!==el && !el.contains(top));",
+                element,
+            ))
+        except Exception:
+            return False
+
+    def _wait_for_element_stable(self, element):
+        """等待弹窗动画/布局变化基本结束，避免刚出现时点击被吞掉。"""
+        last_rect = None
+        for _ in range(4):
+            try:
+                rect = element.rect or {}
+                current = (rect.get('x'), rect.get('y'), rect.get('width'), rect.get('height'))
+                if current == last_rect:
+                    return
+                last_rect = current
+            except Exception:
+                return
+            time.sleep(0.08)
+
+    def _js_click_element(self, element):
+        """用 JS 触发鼠标事件和 click，作为小弹窗/自定义按钮的兜底点击。"""
+        self.driver.execute_script(
+            "var el=arguments[0];"
+            "try{el.scrollIntoView({block:'center',inline:'center'});}catch(e){}"
+            "try{if(el.focus){el.focus({preventScroll:true});}}catch(e){}"
+            "function fire(type){"
+            "  var ev=new MouseEvent(type,{bubbles:true,cancelable:true,view:window,button:0});"
+            "  el.dispatchEvent(ev);"
+            "}"
+            "fire('mouseover');fire('mousemove');fire('mousedown');fire('mouseup');"
+            "if(typeof el.click==='function'){el.click();}else{fire('click');}",
+            element,
+        )
+
     def _click_element(self, locator_type: str, locator_value: str, timeout: float = 10, use_js_click: bool = False):
         last_error = None
-        for attempt in range(3):
+        for attempt in range(4):
+            force_js = bool(use_js_click) or attempt >= 2
             try:
-                element = self._retry_find_element(locator_type, locator_value, timeout=timeout, clickable=not use_js_click, attempts=1)
-                if use_js_click:
-                    self.driver.execute_script('arguments[0].click();', element)
+                if force_js:
+                    element = self._retry_find_element(locator_type, locator_value, timeout=timeout, clickable=False, attempts=1)
                 else:
+                    element = self._wait_for_click_candidate(locator_type, locator_value, timeout=timeout)
+                    self._scroll_into_view(element)
+                self._wait_for_element_stable(element)
+                if force_js:
+                    self._js_click_element(element)
+                    return True
+                if self._element_center_is_covered(self.driver, element):
+                    raise WebDriverException('element center is covered by another element')
+                try:
+                    ActionChains(self.driver).move_to_element(element).pause(0.05).click(element).perform()
+                except Exception:
                     element.click()
                 return True
             except Exception as e:
                 last_error = e
-                if not self._is_retryable_click_error(e) or attempt >= 2:
+                if not self._is_retryable_click_error(e) and not force_js:
+                    # 非典型异常也再给 JS 兜底一次，适配自定义弹窗确认按钮。
+                    time.sleep(0.2)
+                    continue
+                if attempt >= 3:
                     break
                 time.sleep(0.3)
         if last_error:
