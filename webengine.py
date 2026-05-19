@@ -446,6 +446,48 @@ class BrowserEngine:
             element,
         )
 
+    def _try_extjs_click(self, element) -> bool:
+        """优先触发 ExtJS 组件按钮的 handler。
+
+        部分公司内网页面使用 ExtJS。此类按钮表面可能是 <a> 或 <div>，
+        DOM 上只绑定 mouseenter/mouseleave，真正的“确定/保存”逻辑保存在
+        Ext.getCmp(id) 返回的组件对象中。这里先根据 componentid 或 id 取组件，
+        优先执行 fireHandler；失败则回到普通 Selenium 点击流程。
+        """
+        try:
+            result = self.driver.execute_script(
+                "var el=arguments[0];"
+                "if(!el || !window.Ext || !Ext.getCmp){return false;}"
+                "function getCmpFrom(node){"
+                "  var cur=node, checked=0;"
+                "  while(cur && checked<6){"
+                "    var ids=[];"
+                "    try{ids.push(cur.getAttribute('componentid'));}catch(e){}"
+                "    try{ids.push(cur.getAttribute('data-componentid'));}catch(e){}"
+                "    try{ids.push(cur.id);}catch(e){}"
+                "    for(var i=0;i<ids.length;i++){"
+                "      var id=ids[i];"
+                "      if(!id){continue;}"
+                "      try{var cmp=Ext.getCmp(id); if(cmp){return cmp;}}catch(e){}"
+                "    }"
+                "    cur=cur.parentElement; checked++;"
+                "  }"
+                "  return null;"
+                "}"
+                "var cmp=getCmpFrom(el);"
+                "if(!cmp){return false;}"
+                "try{if(cmp.isDisabled && cmp.isDisabled()){return false;}}catch(e){}"
+                "try{if(cmp.disabled){return false;}}catch(e){}"
+                "try{if(cmp.fireHandler){cmp.fireHandler(); return true;}}catch(e){}"
+                "try{if(cmp.handler){cmp.handler.call(cmp.scope || cmp, cmp); return true;}}catch(e){}"
+                "try{if(cmp.fireEvent){cmp.fireEvent('click', cmp); return true;}}catch(e){}"
+                "return false;",
+                element,
+            )
+            return bool(result)
+        except Exception:
+            return False
+
     def _click_element(self, locator_type: str, locator_value: str, timeout: float = 10, use_js_click: bool = False):
         last_error = None
         for attempt in range(4):
@@ -457,6 +499,8 @@ class BrowserEngine:
                     element = self._wait_for_click_candidate(locator_type, locator_value, timeout=timeout)
                     self._scroll_into_view(element)
                 self._wait_for_element_stable(element)
+                if self._try_extjs_click(element):
+                    return True
                 if force_js:
                     self._js_click_element(element)
                     return True
