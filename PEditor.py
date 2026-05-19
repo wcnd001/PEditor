@@ -11,10 +11,10 @@ from PyQt5.QtWidgets import (
     QAction, QSplitter, QFormLayout, QSpinBox, QFrame, QToolBar,
     QToolButton, QSizePolicy,
     QPlainTextEdit, QTableView, QTableWidget, QDoubleSpinBox, QAbstractSpinBox,
-    QStyleOptionComboBox, QStyle
+    QStyleOptionComboBox, QStyle, QColorDialog
 )
 from PyQt5.QtCore import Qt, QTimer, QEvent, QSize
-from PyQt5.QtGui import QFont, QFontMetrics, QTextOption
+from PyQt5.QtGui import QFont, QFontMetrics, QTextOption, QPalette, QColor
 from dbutils import Database
 from datamanager import DataManagerWindow
 from template_editor import TemplateEditorWindow
@@ -31,6 +31,90 @@ __version__ = '3.1'
 input_option_min_layout_width = 360
 # 打包命令：pyinstaller --clean PEditor.spec --distpath "D:\Microsoft Visual Studio\code"
 
+
+
+# 界面主题预设和颜色字段。颜色统一使用 #RRGGBB，便于写入 settings.json。
+# QColor 是 PyQt5 提供的颜色类，用于校验颜色字符串并生成调色板。
+theme_color_fields = [
+    ('color_window', '窗口背景'),
+    ('color_panel', '面板/卡片背景'),
+    ('color_text', '普通文字'),
+    ('color_input_bg', '输入框背景'),
+    ('color_button_bg', '按钮背景'),
+    ('color_button_text', '按钮文字'),
+    ('color_border', '边框颜色'),
+    ('color_primary', '选中主色'),
+    ('color_selected_bg', '选中背景'),
+    ('color_handle_bg', '拖动柄背景'),
+    ('color_handle_selected_bg', '选中拖动柄背景'),
+    ('color_preview_bg', '预览框背景'),
+]
+
+theme_presets = {
+    '浅色': {
+        'color_window': '#f3f4f6',
+        'color_panel': '#ffffff',
+        'color_text': '#111827',
+        'color_input_bg': '#ffffff',
+        'color_button_bg': '#f3f4f6',
+        'color_button_text': '#111827',
+        'color_border': '#d1d5db',
+        'color_primary': '#2563eb',
+        'color_selected_bg': '#dbeafe',
+        'color_handle_bg': '#f3f4f6',
+        'color_handle_selected_bg': '#bfdbfe',
+        'color_preview_bg': '#ffffff',
+    },
+    '深色': {
+        'color_window': '#111827',
+        'color_panel': '#1f2937',
+        'color_text': '#f9fafb',
+        'color_input_bg': '#374151',
+        'color_button_bg': '#374151',
+        'color_button_text': '#f9fafb',
+        'color_border': '#4b5563',
+        'color_primary': '#60a5fa',
+        'color_selected_bg': '#1e3a8a',
+        'color_handle_bg': '#374151',
+        'color_handle_selected_bg': '#1d4ed8',
+        'color_preview_bg': '#111827',
+    },
+    '护眼': {
+        'color_window': '#eef6e8',
+        'color_panel': '#f8fff2',
+        'color_text': '#1f2933',
+        'color_input_bg': '#ffffff',
+        'color_button_bg': '#e8f3dc',
+        'color_button_text': '#1f2933',
+        'color_border': '#b7c8a6',
+        'color_primary': '#4d7c0f',
+        'color_selected_bg': '#d9f99d',
+        'color_handle_bg': '#e8f3dc',
+        'color_handle_selected_bg': '#bbf7d0',
+        'color_preview_bg': '#fbfff5',
+    },
+}
+
+
+def normalize_color_value(value, default='#ffffff'):
+    """校验并规范化颜色字符串，非法颜色回退到 default。"""
+    color = QColor(str(value or '').strip())
+    if color.isValid():
+        return color.name()
+    fallback = QColor(str(default or '').strip())
+    return fallback.name() if fallback.isValid() else '#ffffff'
+
+
+def resolve_theme_colors(settings: dict):
+    """根据设置生成实际使用的主题颜色。"""
+    settings = settings if isinstance(settings, dict) else {}
+    theme_name = str(settings.get('theme_name') or '浅色')
+    preset = theme_presets.get(theme_name, theme_presets['浅色'])
+    colors = {}
+    for key, _label in theme_color_fields:
+        default = preset.get(key, theme_presets['浅色'].get(key, '#ffffff'))
+        colors[key] = normalize_color_value(settings.get(key, default), default)
+    return colors
 
 
 class ToolbarMenuButton(QToolButton):
@@ -762,13 +846,15 @@ class SafeEditableComboBox(QComboBox):
 
 
 class UiSettingsDialog(QDialog):
-    """界面设置窗口：分别设置选项、工具栏、复制按钮、预览框的字体和紧凑程度。"""
+    """界面设置窗口：左侧字号/尺寸，右侧主题颜色，中间可拖动调整宽度。"""
 
     def __init__(self, current_settings: dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle('界面设置')
-        self.resize(560, 380)
+        self.resize(980, 560)
         self._settings = dict(current_settings or {})
+        self.color_edits = {}
+        self._changing_theme = False
         self.init_ui()
 
     @staticmethod
@@ -786,10 +872,26 @@ class UiSettingsDialog(QDialog):
 
     def init_ui(self):
         layout = QVBoxLayout(self)
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        layout.addWidget(splitter, 1)
+
+        left_scroll = QScrollArea()
+        self.left_settings_scroll = left_scroll
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.NoFrame)
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(8, 8, 8, 8)
+        left_layout.setSpacing(8)
+        left_title = QLabel('字号与尺寸设置')
+        left_title.setWordWrap(True)
+        left_layout.addWidget(left_title)
+
         form = QFormLayout()
         form.setRowWrapPolicy(QFormLayout.DontWrapRows)
         form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        form.setHorizontalSpacing(18)
+        form.setHorizontalSpacing(12)
         form.setVerticalSpacing(8)
 
         self.font_scale_spin = self._make_spin('font_scale', 100, 30, 300)
@@ -817,46 +919,244 @@ class UiSettingsDialog(QDialog):
         self.preview_compact_spin = self._make_spin('preview_compactness', 4, 0, 30)
         form.addRow('预览框紧凑程度:', self.preview_compact_spin)
 
+        self.size_form = form
         self._polish_settings_form(form)
-        layout.addLayout(form)
+        left_layout.addLayout(form)
         hint = QLabel('总字体缩放会按比例放大/缩小全部文字；基础字号使用 QFont 点数；紧凑程度为数字，数值越小越紧凑；选项输入框高度为文本输入框自动增高后的最大高度。')
         hint.setWordWrap(True)
-        layout.addWidget(hint)
+        left_layout.addWidget(hint)
+        left_layout.addStretch()
+        left_scroll.setWidget(left_panel)
+        splitter.addWidget(left_scroll)
+
+        right_scroll = QScrollArea()
+        self.right_settings_scroll = right_scroll
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.NoFrame)
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(8, 8, 8, 8)
+        right_layout.setSpacing(8)
+        right_title = QLabel('主题与控件颜色')
+        right_title.setWordWrap(True)
+        right_layout.addWidget(right_title)
+
+        theme_form = QFormLayout()
+        theme_form.setRowWrapPolicy(QFormLayout.DontWrapRows)
+        theme_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        theme_form.setHorizontalSpacing(12)
+        theme_form.setVerticalSpacing(8)
+
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(list(theme_presets.keys()) + ['自定义'])
+        theme_name = str(self._settings.get('theme_name') or '浅色')
+        self.theme_combo.setCurrentText(theme_name if theme_name in theme_presets or theme_name == '自定义' else '浅色')
+        self.theme_combo.currentTextChanged.connect(self.on_theme_changed)
+        theme_form.addRow('主题预设:', self.theme_combo)
+
+        current_theme = self.theme_combo.currentText()
+        preset = theme_presets.get(current_theme, theme_presets['浅色'])
+        for key, label in theme_color_fields:
+            widget = self._make_color_widget(key, preset.get(key, '#ffffff'))
+            theme_form.addRow(label + ':', widget)
+
+        self.theme_form = theme_form
+        self._polish_settings_form(theme_form)
+        right_layout.addLayout(theme_form)
+        theme_hint = QLabel('颜色支持 #RRGGBB 格式。选择预设会填入对应颜色；手动改颜色或点击“选择”后会自动切换为“自定义”。')
+        theme_hint.setWordWrap(True)
+        right_layout.addWidget(theme_hint)
+        right_layout.addStretch()
+        right_scroll.setWidget(right_panel)
+        splitter.addWidget(right_scroll)
+        splitter.setSizes([430, 550])
+        try:
+            left_scroll.viewport().installEventFilter(self)
+            right_scroll.viewport().installEventFilter(self)
+            left_scroll.installEventFilter(self)
+            right_scroll.installEventFilter(self)
+        except Exception:
+            pass
+        qt_safe_single_shot(0, self.update_settings_form_widths)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def _polish_settings_form(self, form):
-        """设置窗口标签留足宽度，避免字号放大后标签挤成两行。"""
+    def _make_color_widget(self, key, default_color):
+        widget = QWidget()
+        row = QHBoxLayout(widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        edit = QLineEdit()
+        edit.setText(normalize_color_value(self._settings.get(key, default_color), default_color))
+        edit.setPlaceholderText('#RRGGBB')
+        edit.setFixedWidth(92)
+        edit.editingFinished.connect(self.mark_custom_theme)
+        button = QPushButton('选择')
+        button.setFixedWidth(64)
+        # QColorDialog 是 PyQt5 内置颜色选择对话框，用于从调色盘中选择颜色。
+        button.clicked.connect(lambda _checked=False, name=key: self.choose_color(name))
+        row.addWidget(edit, 0)
+        row.addWidget(button, 0)
+        row.addStretch(1)
+        widget.setMinimumWidth(0)
+        self.color_edits[key] = edit
+        return widget
+
+    def mark_custom_theme(self):
+        if self._changing_theme:
+            return
+        if hasattr(self, 'theme_combo') and self.theme_combo.currentText() != '自定义':
+            self.theme_combo.setCurrentText('自定义')
+
+    def choose_color(self, key):
+        edit = self.color_edits.get(key)
+        if edit is None:
+            return
+        current = QColor(edit.text().strip())
+        if not current.isValid():
+            current = QColor('#ffffff')
+        selected = QColorDialog.getColor(current, self, '选择颜色')
+        if selected.isValid():
+            edit.setText(selected.name())
+            self.mark_custom_theme()
+
+    def on_theme_changed(self, theme_name):
+        if theme_name not in theme_presets:
+            return
+        self._changing_theme = True
         try:
-            metrics = QFontMetrics(self.font())
-            max_width = 0
-            for row in range(form.rowCount()):
-                item = form.itemAt(row, QFormLayout.LabelRole)
-                widget = item.widget() if item is not None else None
-                if widget is not None and hasattr(widget, 'text'):
-                    max_width = max(max_width, text_width_for(self.font(), widget.text()) + 24)
-            label_width = max(170, min(260, max_width))
+            for key, value in theme_presets[theme_name].items():
+                edit = self.color_edits.get(key)
+                if edit is not None:
+                    edit.setText(value)
+        finally:
+            self._changing_theme = False
+
+    def _spin_width_for(self, spin):
+        """按界面设置窗口数字输入框的内容长度计算宽度，避免无意义拉长。"""
+        try:
+            texts = [str(spin.value()), str(spin.minimum()), str(spin.maximum())]
+            width = max(text_width_for(spin, text) for text in texts)
+        except Exception:
+            width = 42
+        return max(58, min(90, int(width) + 34))
+
+    def _fit_settings_field_widget(self, widget):
+        """仅用于界面设置窗口：字段控件按内容收缩，右侧按钮/下拉框不被输入框顶出。"""
+        if widget is None:
+            return 0
+        try:
+            widget.setMinimumWidth(0)
+            widget.setMaximumWidth(16777215)
+            if isinstance(widget, QAbstractSpinBox):
+                width = self._spin_width_for(widget)
+                widget.setFixedWidth(width)
+                return int(width)
+            elif isinstance(widget, QLineEdit):
+                text = widget.text() or widget.placeholderText() or ''
+                width = max(70, min(150, int(text_width_for(widget, text) + 26)))
+                widget.setFixedWidth(width)
+                return int(width)
+            elif isinstance(widget, QPushButton):
+                width = adaptive_text_width(widget, widget.text(), 4, min_width=54, max_width=90)
+                widget.setFixedWidth(width)
+                return int(width)
+            elif isinstance(widget, QComboBox):
+                texts = [widget.itemText(i) for i in range(widget.count())]
+                max_text = max(texts or [''], key=lambda item: text_width_for(widget, item))
+                width = adaptive_text_width(widget, max_text, 4, min_width=86, max_width=150)
+                widget.setFixedWidth(width)
+                return int(width)
+            else:
+                total = 0
+                children = [child for child in widget.findChildren(QWidget) if isinstance(child, (QAbstractSpinBox, QLineEdit, QPushButton, QComboBox))]
+                for child in children:
+                    total += self._fit_settings_field_widget(child)
+                try:
+                    layout = widget.layout()
+                    if layout is not None:
+                        left, _, right, _ = layout.getContentsMargins()
+                        spacing = layout.spacing()
+                        if children:
+                            total += left + right + spacing * max(0, len(children) - 1)
+                except Exception:
+                    pass
+                if total > 0:
+                    widget.setMinimumWidth(int(total))
+                return int(total)
+        except Exception:
+            return 0
+
+    def _polish_settings_form(self, form, panel_width=None):
+        """仅用于界面设置窗口：标签按内容自适应，空间不足时自动换行，并优先保留右侧控件。"""
+        try:
+            if panel_width is None or int(panel_width) <= 0:
+                panel_width = self.width() // 2
+            panel_width = max(220, int(panel_width))
+            row_infos = []
+            max_field_width = 0
+            max_label_natural = 0
             for row in range(form.rowCount()):
                 label_item = form.itemAt(row, QFormLayout.LabelRole)
                 field_item = form.itemAt(row, QFormLayout.FieldRole)
                 label_widget = label_item.widget() if label_item is not None else None
                 field_widget = field_item.widget() if field_item is not None else None
+                field_width = self._fit_settings_field_widget(field_widget)
+                label_natural = 80
+                if label_widget is not None and hasattr(label_widget, 'text'):
+                    label_natural = text_width_for(label_widget, label_widget.text()) + 18
+                max_field_width = max(max_field_width, int(field_width or 0))
+                max_label_natural = max(max_label_natural, int(label_natural))
+                row_infos.append((label_widget, field_widget, int(label_natural), int(field_width or 0)))
+
+            try:
+                h_spacing = int(form.horizontalSpacing())
+                if h_spacing < 0:
+                    h_spacing = 12
+            except Exception:
+                h_spacing = 12
+            # 标签不再限制为分割区四分之一；只保留一个右侧控件所需的安全宽度。
+            safety_margin = 36
+            field_reserve = max(70, max_field_width)
+            label_max_by_space = max(70, panel_width - field_reserve - h_spacing - safety_margin)
+            shared_label_width = max(70, min(max_label_natural, label_max_by_space))
+
+            for label_widget, field_widget, _label_natural, _field_width in row_infos:
                 if label_widget is not None:
-                    label_widget.setMinimumWidth(label_width)
-                    label_widget.setMaximumWidth(label_width)
+                    label_widget.setFixedWidth(int(shared_label_width))
                     if isinstance(label_widget, QLabel):
-                        label_widget.setWordWrap(False)
+                        label_widget.setWordWrap(True)
                         label_widget.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                if field_widget is not None:
-                    field_widget.setMinimumWidth(120)
+                self._fit_settings_field_widget(field_widget)
         except Exception:
             pass
 
+    def update_settings_form_widths(self):
+        """左右分割条拖动或窗口缩放后，只刷新界面设置窗口内部表单宽度。"""
+        try:
+            left_width = self.left_settings_scroll.viewport().width() if hasattr(self, 'left_settings_scroll') else self.width() // 2
+            right_width = self.right_settings_scroll.viewport().width() if hasattr(self, 'right_settings_scroll') else self.width() // 2
+            if hasattr(self, 'size_form'):
+                self._polish_settings_form(self.size_form, left_width)
+            if hasattr(self, 'theme_form'):
+                self._polish_settings_form(self.theme_form, right_width)
+        except Exception:
+            pass
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Resize:
+            try:
+                if watched in (self.left_settings_scroll, self.left_settings_scroll.viewport(), self.right_settings_scroll, self.right_settings_scroll.viewport()):
+                    qt_safe_single_shot(0, self.update_settings_form_widths)
+            except Exception:
+                pass
+        return super().eventFilter(watched, event)
+
     def get_settings(self):
-        return {
+        payload = {
             'font_scale': int(self.font_scale_spin.value()),
             'option_font_size': int(self.option_font_spin.value()),
             'option_compactness': int(self.option_compact_spin.value()),
@@ -867,7 +1167,15 @@ class UiSettingsDialog(QDialog):
             'copy_compactness': int(self.copy_compact_spin.value()),
             'preview_font_size': int(self.preview_font_spin.value()),
             'preview_compactness': int(self.preview_compact_spin.value()),
+            'theme_name': self.theme_combo.currentText(),
         }
+        theme_name = payload['theme_name']
+        preset = theme_presets.get(theme_name, theme_presets['浅色'])
+        for key, _label in theme_color_fields:
+            edit = self.color_edits.get(key)
+            default = preset.get(key, theme_presets['浅色'].get(key, '#ffffff'))
+            payload[key] = normalize_color_value(edit.text() if edit is not None else default, default)
+        return payload
 
 
 class BrowserSettingsDialog(QDialog):
@@ -1143,12 +1451,13 @@ class InputOptionRow(QWidget):
 
     def set_selected(self, selected):
         self._selected = bool(selected)
-        border = '#2563eb' if selected else '#d1d5db'
-        background = '#dbeafe' if selected else '#ffffff'
-        handle_background = '#bfdbfe' if selected else '#f3f4f6'
+        colors = self.main_window._theme_colors() if self.main_window is not None and hasattr(self.main_window, '_theme_colors') else resolve_theme_colors({})
+        border = colors['color_primary'] if selected else colors['color_border']
+        background = colors['color_selected_bg'] if selected else colors['color_panel']
+        handle_background = colors['color_handle_selected_bg'] if selected else colors['color_handle_bg']
         self.setStyleSheet(
             f"QWidget#inputOptionRow {{ background-color: {background}; border: 1px solid {border}; border-radius: 3px; }}"
-            f"QLabel#inputOptionHandle {{ background-color: {handle_background}; border-right: 1px solid #d1d5db; }}"
+            f"QLabel#inputOptionHandle {{ background-color: {handle_background}; border-right: 1px solid {colors['color_border']}; }}"
             "QLabel#inputOptionLabel { background-color: transparent; border: none; }"
         )
 
@@ -1165,6 +1474,7 @@ class InputOptionRow(QWidget):
         spacing = max(1, option_compact // 2)
         self.row_layout.setContentsMargins(margin, margin, margin, margin)
         self.row_layout.setSpacing(spacing)
+        self.set_selected(getattr(self, '_selected', False))
         self.update_adaptive_size()
 
     def resizeEvent(self, event):
@@ -1292,6 +1602,12 @@ class TemplateSelectRow(QWidget):
         self.setFont(font)
         for child in self.findChildren(QWidget):
             child.setFont(font)
+        colors = self.main_window._theme_colors(settings) if self.main_window is not None and hasattr(self.main_window, '_theme_colors') else resolve_theme_colors(settings)
+        self.setStyleSheet(
+            f"QWidget#templateSelectRow {{ background-color: {colors['color_panel']}; border: 1px solid {colors['color_border']}; border-radius: 3px; }}"
+            "QLabel#templateFixedMark { background-color: transparent; border: none; }"
+            "QLabel#templateSelectLabel { background-color: transparent; border: none; font-weight: bold; }"
+        )
         margin = max(1, option_compact // 2)
         spacing = max(1, option_compact // 2)
         self.row_layout.setContentsMargins(margin, margin, margin, margin)
@@ -1446,6 +1762,7 @@ class CopyButtonItem(QWidget):
         if self.item_layout is not None:
             self.item_layout.setContentsMargins(margin, margin, margin, margin)
             self.item_layout.setSpacing(spacing)
+        self.set_selected(self.isChecked())
         self.update_adaptive_size()
         self.adjustSize()
 
@@ -1460,12 +1777,14 @@ class CopyButtonItem(QWidget):
         return self.button.blockSignals(block)
 
     def set_selected(self, selected):
-        border = '#2563eb' if selected else '#d1d5db'
-        background = '#dbeafe' if selected else '#ffffff'
-        handle_background = '#bfdbfe' if selected else '#f3f4f6'
+        self._selected = bool(selected)
+        colors = self.main_window._theme_colors() if self.main_window is not None and hasattr(self.main_window, '_theme_colors') else resolve_theme_colors({})
+        border = colors['color_primary'] if selected else colors['color_border']
+        background = colors['color_selected_bg'] if selected else colors['color_panel']
+        handle_background = colors['color_handle_selected_bg'] if selected else colors['color_handle_bg']
         self.setStyleSheet(
             f"QWidget#copyButtonItem {{ background-color: {background}; border: 1px solid {border}; border-radius: 3px; }}"
-            f"QLabel#copyButtonHandle {{ background-color: {handle_background}; border-bottom: 1px solid #d1d5db; }}"
+            f"QLabel#copyButtonHandle {{ background-color: {handle_background}; border-bottom: 1px solid {colors['color_border']}; }}"
         )
 
     def resizeEvent(self, event):
@@ -1575,7 +1894,7 @@ class PEditor(QMainWindow):
 
     @staticmethod
     def _default_ui_settings():
-        return {
+        settings = {
             'font_scale': 100,
             'option_font_size': 10,
             'option_compactness': 4,
@@ -1586,7 +1905,10 @@ class PEditor(QMainWindow):
             'copy_compactness': 4,
             'preview_font_size': 11,
             'preview_compactness': 4,
+            'theme_name': '浅色',
         }
+        settings.update(theme_presets['浅色'])
+        return settings
 
     def _load_settings_payload(self):
         settings = self._default_ui_settings()
@@ -1626,14 +1948,37 @@ class PEditor(QMainWindow):
         for key in ('option_compactness', 'toolbar_compactness', 'copy_compactness', 'preview_compactness'):
             payload[key] = self._safe_int(payload.get(key), defaults[key], 0, 30)
         payload['option_input_height'] = self._safe_int(payload.get('option_input_height'), defaults['option_input_height'], 24, 600)
+        theme_name = str(payload.get('theme_name') or '浅色')
+        if theme_name not in theme_presets and theme_name != '自定义':
+            theme_name = '浅色'
+        payload['theme_name'] = theme_name
+        preset = theme_presets.get(theme_name, theme_presets['浅色'])
+        for key, _label in theme_color_fields:
+            default_color = preset.get(key, defaults.get(key, '#ffffff'))
+            payload[key] = normalize_color_value(payload.get(key, default_color), default_color)
         return payload
 
-    def _build_app_stylesheet(self, settings: dict):
-        """生成不含 font-size 的样式表。
+    def _theme_colors(self, settings=None):
+        return resolve_theme_colors(self._normalize_ui_settings(settings or getattr(self, '_ui_settings', self._default_ui_settings())))
 
-        字号统一由 QFont.setPointSize 控制；QSS 只负责边框、背景、padding、最小高度等。
-        """
+    def _build_theme_palette(self, settings: dict):
+        colors = self._theme_colors(settings)
+        palette = QPalette()
+        palette.setColor(QPalette.Window, QColor(colors['color_window']))
+        palette.setColor(QPalette.WindowText, QColor(colors['color_text']))
+        palette.setColor(QPalette.Base, QColor(colors['color_input_bg']))
+        palette.setColor(QPalette.AlternateBase, QColor(colors['color_panel']))
+        palette.setColor(QPalette.Text, QColor(colors['color_text']))
+        palette.setColor(QPalette.Button, QColor(colors['color_button_bg']))
+        palette.setColor(QPalette.ButtonText, QColor(colors['color_button_text']))
+        palette.setColor(QPalette.Highlight, QColor(colors['color_primary']))
+        palette.setColor(QPalette.HighlightedText, QColor(colors['color_preview_bg']))
+        return palette
+
+    def _build_app_stylesheet(self, settings: dict):
+        """生成主窗口样式表。字号仍由 QFont 控制，QSS 负责颜色、边框、padding 和高度。"""
         settings = self._normalize_ui_settings(settings)
+        colors = self._theme_colors(settings)
         option_font = scaled_point_size(settings, 'option_font_size', 10)
         toolbar_font = scaled_point_size(settings, 'toolbar_font_size', 10)
         copy_font = scaled_point_size(settings, 'copy_font_size', 10)
@@ -1655,15 +2000,28 @@ class PEditor(QMainWindow):
         copy_padding_h = max(2, copy_compact + 2)
 
         return (
+            f"QMainWindow {{ background-color: {colors['color_window']}; color: {colors['color_text']}; }}\n"
+            f"QWidget {{ color: {colors['color_text']}; }}\n"
+            f"QFrame#gteLeftPanel, QFrame#gteRightPanel, QFrame#gteDownPanel {{ "
+            f"background-color: {colors['color_panel']}; border: 1px solid {colors['color_border']}; }}\n"
+            f"QScrollArea, QScrollArea > QWidget > QWidget {{ background-color: {colors['color_panel']}; }}\n"
+            f"QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QListWidget, QTableWidget, QTableView, QSpinBox, QDoubleSpinBox {{ "
+            f"background-color: {colors['color_input_bg']}; color: {colors['color_text']}; border: 1px solid {colors['color_border']}; }}\n"
+            f"QPushButton, QToolButton {{ background-color: {colors['color_button_bg']}; color: {colors['color_button_text']}; "
+            f"border: 1px solid {colors['color_border']}; border-radius: 3px; }}\n"
+            f"QPushButton:hover, QToolButton:hover {{ border: 1px solid {colors['color_primary']}; }}\n"
+            f"QMenu {{ background-color: {colors['color_panel']}; color: {colors['color_text']}; border: 1px solid {colors['color_border']}; }}\n"
+            f"QMenu::item:selected {{ background-color: {colors['color_selected_bg']}; color: {colors['color_text']}; }}\n"
             f"QToolBar#mainToolbar QToolButton {{ padding: {toolbar_padding_v}px {toolbar_padding_h}px; min-height: {toolbar_min_height}px; }}\n"
             f"QWidget#inputOptionRow QTextEdit, QWidget#inputOptionRow QComboBox, QWidget#templateSelectRow QComboBox {{ "
             f"padding: {option_padding_v}px {option_padding_h}px; min-height: {option_min_height}px; }}\n"
             f"QWidget#copyButtonItem QPushButton {{ padding: {copy_padding_v}px {copy_padding_h}px; min-height: {copy_min_height}px; }}\n"
-            f"QTextEdit#previewTextEdit {{ padding: {preview_padding}px; border: none; background: white; }}\n"
+            f"QTextEdit#previewTextEdit {{ padding: {preview_padding}px; border: none; background: {colors['color_preview_bg']}; color: {colors['color_text']}; }}\n"
             "QTextEdit#previewTextEdit:focus { border: none; }\n"
             "QTextEdit#previewTextEdit QFrame { border: none; }\n"
             "QPlainTextEdit, QListWidget, QTableWidget { padding: 2px; }"
         )
+
 
     def apply_ui_settings(self, settings: dict):
         """应用界面设置。
@@ -1688,6 +2046,8 @@ class PEditor(QMainWindow):
                 app_font = app.font()
                 app_font.setPointSize(scaled_point_size(merged, 'option_font_size', 10))
                 app.setFont(app_font)
+                app.setPalette(self._build_theme_palette(merged))
+            self.setPalette(self._build_theme_palette(merged))
         except Exception:
             pass
         stylesheet = self._build_app_stylesheet(merged)
@@ -1787,6 +2147,18 @@ class PEditor(QMainWindow):
             compact = int(settings.get('option_compactness', 4))
             font = QFont()
             font.setPointSize(base_size)
+            colors = self._theme_colors(settings)
+            try:
+                window.setPalette(self._build_theme_palette(settings))
+                window.setStyleSheet(
+                    f"QMainWindow, QDialog {{ background-color: {colors['color_window']}; }}"
+                    f"QWidget {{ color: {colors['color_text']}; }}"
+                    f"QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QListWidget, QTableWidget, QTableView, QSpinBox, QDoubleSpinBox {{ background-color: {colors['color_input_bg']}; color: {colors['color_text']}; border: 1px solid {colors['color_border']}; }}"
+                    f"QPushButton, QToolButton {{ background-color: {colors['color_button_bg']}; color: {colors['color_button_text']}; border: 1px solid {colors['color_border']}; border-radius: 3px; }}"
+                    f"QPushButton:hover, QToolButton:hover {{ border: 1px solid {colors['color_primary']}; }}"
+                )
+            except Exception:
+                pass
             widgets = [window] + list(window.findChildren(QWidget))
             min_height = adaptive_control_height(font, compact, min_height=22)
             text_min_height = adaptive_control_height(font, compact, min_height=60, lines=3)
@@ -1977,6 +2349,7 @@ class PEditor(QMainWindow):
             try:
                 preview_font_size = scaled_point_size(settings, 'preview_font_size', 11)
                 preview_padding = settings.get('preview_compactness', 4)
+                colors = self._theme_colors(settings)
                 self._safe_set_font(self.result_text, preview_font_size)
                 self.result_text.setFrameShape(QFrame.NoFrame)
                 self.result_text.setLineWidth(0)
@@ -1984,12 +2357,12 @@ class PEditor(QMainWindow):
                 self.result_text.setStyleSheet(
                     'QTextEdit#previewTextEdit {'
                     f'padding: {preview_padding}px; '
-                    'border: 0px; background: white;'
+                    f'border: 0px; background: {colors["color_preview_bg"]}; color: {colors["color_text"]};'
                     '} QTextEdit#previewTextEdit:focus { border: 0px; }'
                 )
                 viewport = self.result_text.viewport()
                 if viewport is not None:
-                    viewport.setStyleSheet('border: 0px; background: white;')
+                    viewport.setStyleSheet(f'border: 0px; background: {colors["color_preview_bg"]};')
                     viewport.setAutoFillBackground(False)
             except RuntimeError:
                 pass
@@ -2359,8 +2732,7 @@ class PEditor(QMainWindow):
     def _make_panel(self, object_name='gtePanel', white=False):
         panel = QFrame()
         panel.setObjectName(object_name)
-        color = 'white' if white else 'transparent'
-        panel.setStyleSheet(f'QFrame#{object_name} {{ background-color: {color}; border: 1px solid #999; }}')
+        # 面板颜色由 _build_app_stylesheet() 统一控制，避免主题设置被局部样式覆盖。
         return panel
 
     def create_left_panel(self):
@@ -2406,7 +2778,7 @@ class PEditor(QMainWindow):
         self.result_text = QTextEdit()
         self.result_text.setObjectName('previewTextEdit')
         self.result_text.setFrameShape(QFrame.NoFrame)
-        self.result_text.setStyleSheet('border: none; background: white;')
+        self.result_text.setStyleSheet('border: none;')
         self.result_text.setReadOnly(True)
         self.result_text.setPlaceholderText('工艺段落将实时显示在此...')
         self.result_text.setLineWrapMode(QTextEdit.WidgetWidth)
@@ -3504,8 +3876,8 @@ class PEditor(QMainWindow):
                 if self._copy_last_selected_field == field_name:
                     self._copy_last_selected_field = ''
             self._apply_copy_button_checked_state(self._copy_selected_fields)
-            if checked:
-                self.copy_field_content(field_name)
+            # 选中和取消选中都执行复制；取消选中只是改变高亮状态，不影响复制当前按钮内容。
+            qt_safe_single_shot(0, lambda f=field_name: self.copy_field_content(f))
             return
 
         self._copy_last_selected_field = field_name
@@ -3521,8 +3893,8 @@ class PEditor(QMainWindow):
         else:
             self._copy_last_selected_field = ''
         self._apply_copy_button_checked_state(self._copy_selected_fields)
-        if checked:
-            self.copy_field_content(field_name)
+        # 多选模式下取消某个按钮选中时，也复制该按钮对应字段内容。
+        qt_safe_single_shot(0, lambda f=field_name: self.copy_field_content(f))
 
     def _selected_copy_field_names(self):
         return list(self._selected_copy_field_names_for_action())
@@ -3561,17 +3933,19 @@ class PEditor(QMainWindow):
 
     def refresh_copy_button_visibility(self, final_fields=None):
         visible_fields = self._get_visible_copy_button_fields() if self.current_template_name else set()
-        if not visible_fields:
-            for item_widget, _ in self.copy_buttons:
-                item_widget._hidden_by_filter = True
-                item_widget.hide()
-            self._relayout_copy_buttons()
-            return
+        changed = False
         for item_widget, field in self.copy_buttons:
-            item_widget._hidden_by_filter = field not in visible_fields
-            if item_widget._hidden_by_filter:
-                item_widget.hide()
-        self._relayout_copy_buttons()
+            new_hidden = True if not visible_fields else field not in visible_fields
+            if getattr(item_widget, '_hidden_by_filter', False) != new_hidden:
+                changed = True
+            item_widget._hidden_by_filter = new_hidden
+            if new_hidden:
+                try:
+                    item_widget.hide()
+                except Exception:
+                    pass
+        if changed:
+            self._relayout_copy_buttons()
 
     def show_add_copy_button_menu(self):
         if not self.current_template_name:
@@ -3634,14 +4008,17 @@ class PEditor(QMainWindow):
         if not self.current_template_name:
             return
         try:
-            self.update_result_text(force=True)
-            copy_text = self._last_final_fields.get(field_name, '')
-            if field_name not in self._last_final_fields:
+            input_values = self.collect_input_values()
+            copy_text = ''
+            # 普通点击复制按钮时不再强制刷新预览和重排复制区；输入未变化时直接用缓存。
+            if field_name in (self._last_final_fields or {}) and input_values == (self._last_input_values or {}):
+                copy_text = self._last_final_fields.get(field_name, '')
+            else:
                 content = dict(self._get_current_process_content() or {})
                 content['selected_fields'] = [field_name]
                 _, _, final_fields = self.data_matcher.render(
                     self.current_template_name,
-                    self.collect_input_values(),
+                    input_values,
                     process_content_override=content,
                 )
                 copy_text = final_fields.get(field_name, '')
