@@ -10,7 +10,8 @@ from PyQt5.QtWidgets import (
     QGroupBox, QAbstractItemView, QScrollArea, QButtonGroup, QMenu,
     QAction, QSplitter, QFormLayout, QSpinBox, QFrame, QToolBar,
     QToolButton, QSizePolicy,
-    QPlainTextEdit, QTableView, QTableWidget, QDoubleSpinBox, QAbstractSpinBox
+    QPlainTextEdit, QTableView, QTableWidget, QDoubleSpinBox, QAbstractSpinBox,
+    QStyleOptionComboBox, QStyle
 )
 from PyQt5.QtCore import Qt, QTimer, QEvent, QSize
 from PyQt5.QtGui import QFont, QFontMetrics, QTextOption
@@ -611,6 +612,155 @@ class AutoWrapTextEdit(QTextEdit):
 
 
 
+class SafeEditableComboBox(QComboBox):
+    """可输入下拉框：避免内部输入框覆盖右侧下拉按钮，并保证按钮热区可点击。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self._line_edit_syncing = False
+        self._popup_hot_pressed = False
+        try:
+            line_edit = self.lineEdit()
+            if line_edit is not None:
+                # QLineEdit 是 QComboBox 内部输入框，去掉边框并交给下拉框外壳统一绘制。
+                line_edit.setFrame(False)
+                line_edit.setTextMargins(0, 0, 4, 0)
+                line_edit.setStyleSheet('QLineEdit { border: none; background: transparent; padding: 0px; min-height: 0px; }')
+                line_edit.installEventFilter(self)
+        except Exception:
+            pass
+        qt_safe_single_shot(0, self.sync_line_edit_area)
+
+    def _style_arrow_width(self):
+        """读取当前 Qt 样式中的下拉箭头区域宽度。"""
+        try:
+            option = QStyleOptionComboBox()
+            self.initStyleOption(option)
+            rect = self.style().subControlRect(QStyle.CC_ComboBox, option, QStyle.SC_ComboBoxArrow, self)
+            return max(0, int(rect.width()))
+        except Exception:
+            return 0
+
+    def _reserved_button_width(self):
+        """右侧为下拉按钮预留宽度，避免可输入区域盖住箭头。"""
+        try:
+            height = int(self.height())
+        except Exception:
+            height = 24
+        # 这里比实际箭头按钮略宽一点，解决箭头左侧边缘被内部输入框吃掉的问题。
+        return max(30, min(58, max(height + 10, self._style_arrow_width() + 12)))
+
+    def _point_in_popup_zone(self, point):
+        """判断鼠标点是否落在右侧下拉按钮热区。"""
+        try:
+            return int(point.x()) >= max(0, int(self.width()) - self._reserved_button_width())
+        except Exception:
+            return False
+
+    def _show_popup_from_hot_zone(self):
+        """从右侧热区点击时打开下拉菜单。"""
+        try:
+            self.sync_line_edit_area()
+            self.setFocus(Qt.MouseFocusReason)
+            self.showPopup()
+        except RuntimeError:
+            return
+        except Exception:
+            return
+
+    def sync_line_edit_area(self):
+        """把内部 QLineEdit 限制在下拉箭头左侧。"""
+        if getattr(self, '_line_edit_syncing', False):
+            return
+        self._line_edit_syncing = True
+        try:
+            if not self.isEditable():
+                return
+            line_edit = self.lineEdit()
+            if line_edit is None:
+                return
+            try:
+                line_edit.setFrame(False)
+                line_edit.setTextMargins(0, 0, 4, 0)
+                line_edit.setStyleSheet('QLineEdit { border: none; background: transparent; padding: 0px; min-height: 0px; }')
+                line_edit.installEventFilter(self)
+            except Exception:
+                pass
+            width = max(1, int(self.width()))
+            height = max(1, int(self.height()))
+            left = 4
+            top = 2
+            bottom = 2
+            reserved = self._reserved_button_width()
+            edit_width = max(20, width - reserved - left - 4)
+            edit_height = max(1, height - top - bottom)
+            line_edit.setGeometry(left, top, edit_width, edit_height)
+        except RuntimeError:
+            return
+        except Exception:
+            return
+        finally:
+            self._line_edit_syncing = False
+
+    def eventFilter(self, watched, event):
+        """拦截内部输入框右侧热区点击，避免事件被 QLineEdit 吃掉。"""
+        try:
+            line_edit = self.lineEdit()
+            is_line_edit = watched is not None and watched == line_edit
+        except Exception:
+            is_line_edit = False
+        if is_line_edit and event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease, QEvent.MouseButtonDblClick):
+            try:
+                combo_point = watched.mapTo(self, event.pos())
+                if event.button() == Qt.LeftButton and self._point_in_popup_zone(combo_point):
+                    if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick):
+                        self._popup_hot_pressed = True
+                        self._show_popup_from_hot_zone()
+                    elif self._popup_hot_pressed:
+                        self._popup_hot_pressed = False
+                    event.accept()
+                    return True
+            except Exception:
+                pass
+        return super().eventFilter(watched, event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._point_in_popup_zone(event.pos()):
+            self._popup_hot_pressed = True
+            self._show_popup_from_hot_zone()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and getattr(self, '_popup_hot_pressed', False):
+            self._popup_hot_pressed = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def setFont(self, font):
+        super().setFont(font)
+        try:
+            line_edit = self.lineEdit()
+            if line_edit is not None:
+                line_edit.setFont(font)
+        except Exception:
+            pass
+        qt_safe_single_shot(0, self.sync_line_edit_area)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.sync_line_edit_area()
+        qt_safe_single_shot(0, self.sync_line_edit_area)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        qt_safe_single_shot(0, self.sync_line_edit_area)
+
+
+
 class UiSettingsDialog(QDialog):
     """界面设置窗口：分别设置选项、工具栏、复制按钮、预览框的字体和紧凑程度。"""
 
@@ -787,7 +937,7 @@ class InputOptionRow(QWidget):
         self.row_layout.setContentsMargins(3, 3, 3, 3)
         self.row_layout.setSpacing(4)
 
-        self.handle = QLabel('•••')
+        self.handle = QLabel('☰')
         self.handle.setObjectName('inputOptionHandle')
         self.handle.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.handle.setCursor(Qt.SizeAllCursor)
@@ -931,6 +1081,12 @@ class InputOptionRow(QWidget):
             try:
                 self.editor.view().setMinimumWidth(max(100, int(editor_width)))
                 self.editor.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            except Exception:
+                pass
+            try:
+                if hasattr(self.editor, 'sync_line_edit_area'):
+                    self.editor.sync_line_edit_area()
+                    qt_safe_single_shot(0, self.editor.sync_line_edit_area)
             except Exception:
                 pass
         elif isinstance(self.editor, QTextEdit):
@@ -1500,7 +1656,7 @@ class PEditor(QMainWindow):
 
         return (
             f"QToolBar#mainToolbar QToolButton {{ padding: {toolbar_padding_v}px {toolbar_padding_h}px; min-height: {toolbar_min_height}px; }}\n"
-            f"QWidget#inputOptionRow QLineEdit, QWidget#inputOptionRow QTextEdit, QWidget#inputOptionRow QComboBox, QWidget#templateSelectRow QComboBox {{ "
+            f"QWidget#inputOptionRow QTextEdit, QWidget#inputOptionRow QComboBox, QWidget#templateSelectRow QComboBox {{ "
             f"padding: {option_padding_v}px {option_padding_h}px; min-height: {option_min_height}px; }}\n"
             f"QWidget#copyButtonItem QPushButton {{ padding: {copy_padding_v}px {copy_padding_h}px; min-height: {copy_min_height}px; }}\n"
             f"QTextEdit#previewTextEdit {{ padding: {preview_padding}px; border: none; background: white; }}\n"
@@ -1610,6 +1766,8 @@ class PEditor(QMainWindow):
                 line_edit = widget.lineEdit() if widget.isEditable() else None
                 if line_edit is not None:
                     line_edit.setFont(font)
+                if hasattr(widget, 'sync_line_edit_area'):
+                    widget.sync_line_edit_area()
         except RuntimeError:
             return
         except Exception:
@@ -2723,9 +2881,7 @@ class PEditor(QMainWindow):
             editor.setPlaceholderText('')
             return editor
         if widget_type in ('combo', 'editable_combo'):
-            combo = QComboBox()
-            if widget_type == 'editable_combo':
-                combo.setEditable(True)
+            combo = SafeEditableComboBox() if widget_type == 'editable_combo' else QComboBox()
             combo.addItem('')
             options = self.data_matcher.get_field_options(opt.get('source', {}), input_values=initial_values or {})
             combo.addItems(options if options else ['（无选项）'])
