@@ -24,6 +24,7 @@ class BrowserEngine:
         self.main_window_handle = None
         self.preferred_window_handle = None
         self.current_config = {}
+        self.current_implicit_wait = 0.0
 
     def is_connected(self) -> bool:
         try:
@@ -355,6 +356,53 @@ class BrowserEngine:
             except Exception:
                 pass
 
+    @staticmethod
+    def _quick_action_timeout(timeout: float, maximum: float = 3.0) -> float:
+        """普通点击/输入类动作的失败等待上限。
+
+        专门的“等待元素/等待元素消失”等步骤仍使用用户设置的完整 timeout。
+        这里仅限制普通动作失败时的等待，避免 timeout、重试次数和隐式等待叠加后卡很久。
+        """
+        try:
+            value = float(timeout)
+        except Exception:
+            value = maximum
+        if value <= 0:
+            return 0.2
+        return max(0.2, min(float(maximum), value))
+
+    def _set_implicit_wait(self, seconds: float):
+        try:
+            seconds = max(0.0, float(seconds))
+        except Exception:
+            seconds = 0.0
+        self.current_implicit_wait = seconds
+        try:
+            if self.driver is not None:
+                self.driver.implicitly_wait(seconds)
+        except Exception:
+            pass
+
+    def _find_existing_click_candidate_now(self, locator_type: str, locator_value: str):
+        """不额外等待地取一个当前已经存在的可见候选元素。"""
+        try:
+            by = self._locator_to_by(locator_type)
+            elements = self.driver.find_elements(by, locator_value)
+        except Exception:
+            return None
+        fallback = None
+        for element in elements:
+            try:
+                if fallback is None:
+                    fallback = element
+                if element.is_displayed() and element.is_enabled():
+                    return element
+            except StaleElementReferenceException:
+                continue
+            except Exception:
+                continue
+        return fallback
+
     def _retry_find_element(self, locator_type: str, locator_value: str, timeout: float = 10, clickable: bool = False, attempts: int = 3):
         last_error = None
         for _ in range(max(1, attempts)):
@@ -447,40 +495,25 @@ class BrowserEngine:
         )
 
     def _try_extjs_click(self, element) -> bool:
-        """优先触发 ExtJS 组件按钮的 handler。
+        """普通点击失败后的 ExtJS 组件按钮兜底。
 
-        部分公司内网页面使用 ExtJS。此类按钮表面可能是 <a> 或 <div>，
-        DOM 上只绑定 mouseenter/mouseleave，真正的“确定/保存”逻辑保存在
-        Ext.getCmp(id) 返回的组件对象中。这里先根据 componentid 或 id 取组件，
-        优先执行 fireHandler；失败则回到普通 Selenium 点击流程。
+        不再根据 class、x-btn 等特征提前抢占点击，也不向父级组件扩大查找范围。
+        只读取当前元素自身的 componentid 或 id，并调用 Ext.getCmp(id).fireHandler()。
         """
         try:
             result = self.driver.execute_script(
                 "var el=arguments[0];"
                 "if(!el || !window.Ext || !Ext.getCmp){return false;}"
-                "function getCmpFrom(node){"
-                "  var cur=node, checked=0;"
-                "  while(cur && checked<6){"
-                "    var ids=[];"
-                "    try{ids.push(cur.getAttribute('componentid'));}catch(e){}"
-                "    try{ids.push(cur.getAttribute('data-componentid'));}catch(e){}"
-                "    try{ids.push(cur.id);}catch(e){}"
-                "    for(var i=0;i<ids.length;i++){"
-                "      var id=ids[i];"
-                "      if(!id){continue;}"
-                "      try{var cmp=Ext.getCmp(id); if(cmp){return cmp;}}catch(e){}"
-                "    }"
-                "    cur=cur.parentElement; checked++;"
-                "  }"
-                "  return null;"
-                "}"
-                "var cmp=getCmpFrom(el);"
+                "var id=null;"
+                "try{id=el.getAttribute('componentid') || el.id;}catch(e){id=null;}"
+                "if(!id){return false;}"
+                "var cmp=null;"
+                "try{cmp=Ext.getCmp(id);}catch(e){cmp=null;}"
                 "if(!cmp){return false;}"
                 "try{if(cmp.isDisabled && cmp.isDisabled()){return false;}}catch(e){}"
                 "try{if(cmp.disabled){return false;}}catch(e){}"
                 "try{if(cmp.fireHandler){cmp.fireHandler(); return true;}}catch(e){}"
                 "try{if(cmp.handler){cmp.handler.call(cmp.scope || cmp, cmp); return true;}}catch(e){}"
-                "try{if(cmp.fireEvent){cmp.fireEvent('click', cmp); return true;}}catch(e){}"
                 "return false;",
                 element,
             )
@@ -489,43 +522,58 @@ class BrowserEngine:
             return False
 
     def _click_element(self, locator_type: str, locator_value: str, timeout: float = 10, use_js_click: bool = False):
+        """点击元素。
+
+        v3.3 调整：先走原普通点击流程；普通点击失败后再尝试 ExtJS fireHandler，
+        避免 ExtJS 兜底抢占原本可正常点击的普通元素。普通点击失败等待使用短上限，
+        需要长等待时请在流程中先添加“等待元素”步骤。
+        """
+        action_timeout = self._quick_action_timeout(timeout)
+        element = None
         last_error = None
-        for attempt in range(4):
-            force_js = bool(use_js_click) or attempt >= 2
-            try:
-                if force_js:
-                    element = self._retry_find_element(locator_type, locator_value, timeout=timeout, clickable=False, attempts=1)
-                else:
-                    element = self._wait_for_click_candidate(locator_type, locator_value, timeout=timeout)
-                    self._scroll_into_view(element)
-                self._wait_for_element_stable(element)
-                if self._try_extjs_click(element):
-                    return True
-                if force_js:
-                    self._js_click_element(element)
-                    return True
+
+        try:
+            element = self._wait_for_click_candidate(locator_type, locator_value, timeout=action_timeout)
+            self._scroll_into_view(element)
+            self._wait_for_element_stable(element)
+            if use_js_click:
+                self._js_click_element(element)
+            else:
                 if self._element_center_is_covered(self.driver, element):
                     raise WebDriverException('element center is covered by another element')
                 try:
                     ActionChains(self.driver).move_to_element(element).pause(0.05).click(element).perform()
                 except Exception:
                     element.click()
+            return True
+        except Exception as e:
+            last_error = e
+
+        # 普通点击失败后，再尝试 ExtJS 组件按钮兜底。
+        try:
+            if element is None:
+                element = self._find_existing_click_candidate_now(locator_type, locator_value)
+            if element is not None and self._try_extjs_click(element):
                 return True
-            except Exception as e:
-                last_error = e
-                if not self._is_retryable_click_error(e) and not force_js:
-                    # 非典型异常也再给 JS 兜底一次，适配自定义弹窗确认按钮。
-                    time.sleep(0.2)
-                    continue
-                if attempt >= 3:
-                    break
-                time.sleep(0.3)
+        except Exception as e:
+            last_error = e
+
+        # 最后保留一次 JS click 兜底，但不再重复完整 timeout。
+        try:
+            if element is None:
+                element = self._find_existing_click_candidate_now(locator_type, locator_value)
+            if element is not None:
+                self._js_click_element(element)
+                return True
+        except Exception as e:
+            last_error = e
+
         if last_error:
             raise last_error
         raise BrowserEngineError('点击元素失败')
 
     def _right_click_element(self, locator_type: str, locator_value: str, timeout: float = 10):
-        element = self._retry_find_element(locator_type, locator_value, timeout=timeout, clickable=True)
+        element = self._retry_find_element(locator_type, locator_value, timeout=self._quick_action_timeout(timeout), clickable=True, attempts=1)
         ActionChains(self.driver).move_to_element(element).context_click(element).perform()
         return True
 
@@ -539,8 +587,34 @@ class BrowserEngine:
         self._click_element(step.get('target_locator_type', ''), step.get('target_locator_value', ''), timeout=timeout)
         return True
 
+    def _execute_custom_javascript(self, step: dict, payload: dict, timeout: float = 10):
+        """执行浏览器步骤中的自定义 JavaScript。
+
+        如果当前步骤填写了定位值，程序先定位元素，并把该元素作为 arguments[0]
+        传入脚本；payload 作为 arguments[1] 传入。这样在脚本中可以写：
+        Ext.getCmp(arguments[0].id).fireHandler()
+
+        如果没有填写定位值，则直接在当前页面执行脚本，此时 payload 作为
+        arguments[0] 传入。
+        """
+        script = self.render_value_template(step.get('value_template', ''), payload).strip()
+        if not script:
+            raise BrowserEngineError('执行JavaScript命令不能为空')
+        locator_value = str(step.get('locator_value', '') or '').strip()
+        if locator_value:
+            element = self._retry_find_element(
+                step.get('locator_type', ''),
+                locator_value,
+                timeout=self._quick_action_timeout(timeout),
+                clickable=False,
+                attempts=1,
+            )
+            self._scroll_into_view(element)
+            return self.driver.execute_script(script, element, payload or {})
+        return self.driver.execute_script(script, payload or {})
+
     def _input_text(self, locator_type: str, locator_value: str, value: str, timeout: float = 10, clear_before_input: bool = True):
-        element = self._retry_find_element(locator_type, locator_value, timeout=timeout, clickable=False)
+        element = self._retry_find_element(locator_type, locator_value, timeout=self._quick_action_timeout(timeout), clickable=False, attempts=1)
         if clear_before_input:
             try:
                 element.clear()
@@ -605,7 +679,7 @@ class BrowserEngine:
         actions.key_down(Keys.CONTROL)
         performed = False
         for value in values:
-            element = self._retry_find_element(locator_type, value, timeout=timeout, clickable=True)
+            element = self._retry_find_element(locator_type, value, timeout=self._quick_action_timeout(timeout), clickable=True, attempts=1)
             self._scroll_into_view(element)
             actions.click(element)
             performed = True
@@ -660,7 +734,7 @@ class BrowserEngine:
             raise BrowserEngineError('键盘组合键不能为空')
         element = None
         if str(locator_value or '').strip():
-            element = self._retry_find_element(locator_type, locator_value, timeout=timeout, clickable=False)
+            element = self._retry_find_element(locator_type, locator_value, timeout=self._quick_action_timeout(timeout), clickable=False, attempts=1)
             try:
                 element.click()
             except Exception:
@@ -674,8 +748,9 @@ class BrowserEngine:
         return True
 
     def _drag_drop_element(self, step: dict, timeout: float = 10):
-        source = self._retry_find_element(step.get('locator_type', ''), step.get('locator_value', ''), timeout=timeout, clickable=True)
-        target = self._retry_find_element(step.get('target_locator_type', ''), step.get('target_locator_value', ''), timeout=timeout, clickable=True)
+        action_timeout = self._quick_action_timeout(timeout)
+        source = self._retry_find_element(step.get('locator_type', ''), step.get('locator_value', ''), timeout=action_timeout, clickable=True, attempts=1)
+        target = self._retry_find_element(step.get('target_locator_type', ''), step.get('target_locator_value', ''), timeout=action_timeout, clickable=True, attempts=1)
         target_rect = getattr(target, 'rect', {}) or {}
         width = max(1, int(float(target_rect.get('width', 1) or 1)))
         height = max(1, int(float(target_rect.get('height', 1) or 1)))
@@ -698,7 +773,7 @@ class BrowserEngine:
         return self._click_element(locator_type, locator_value, timeout=timeout)
 
     def _fill_table_cells(self, locator_type: str, locator_value: str, table_text: str, timeout: float = 10, clear_before_input: bool = True):
-        table = self._retry_find_element(locator_type, locator_value, timeout=timeout, clickable=False)
+        table = self._retry_find_element(locator_type, locator_value, timeout=self._quick_action_timeout(timeout), clickable=False, attempts=1)
         rows = [line for line in str(table_text or '').splitlines() if line.strip() != '']
         if not rows:
             raise BrowserEngineError('自动填单元格内容不能为空')
@@ -1479,8 +1554,9 @@ class BrowserEngine:
         self.ensure_connected(browser_cfg, logger=logger)
 
         implicit_wait = float(browser_cfg.get('implicit_wait', 0) or 0)
-        if implicit_wait > 0:
-            self.driver.implicitly_wait(implicit_wait)
+        # 流程执行主要依靠每个步骤的显式等待。隐式等待过长会和显式等待叠加，
+        # 导致失败步骤卡很久，因此运行流程时把隐式等待控制在 0.5 秒以内。
+        self._set_implicit_wait(min(max(implicit_wait, 0.0), 0.5))
 
         if not self.main_window_handle:
             try:
@@ -1542,6 +1618,11 @@ class BrowserEngine:
 
             elif action == '下拉菜单两段式操作':
                 self._dropdown_two_stage(step, timeout=timeout)
+
+            elif action == '执行JavaScript命令':
+                js_result = self._execute_custom_javascript(step, payload, timeout=timeout)
+                if js_result not in (None, ''):
+                    self._log(logger, f'JavaScript执行结果：{js_result}')
 
             elif action == '拖拽元素':
                 self._drag_drop_element(step, timeout=timeout)

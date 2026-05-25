@@ -26,7 +26,7 @@ from utils import resource_path
 from log import LogViewerDialog, log_change
 from gui_helpers import signal_blocked, wrap_text_flags as _wrap_text_flags
 
-__version__ = '3.2'
+__version__ = '3.3'
 # 主界面输入区的最小布局宽度。左侧分割区域小于此值时，行内控件按该宽度稳定布局，避免长文本反复重排导致卡顿。
 input_option_min_layout_width = 360
 # 打包命令：pyinstaller --clean PEditor.spec --distpath "D:\Microsoft Visual Studio\code"

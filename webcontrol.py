@@ -79,6 +79,7 @@ ACTION_DRAG = '拖拽元素'
 ACTION_PAGE_CONDITION = '页面条件判断'
 ACTION_ADD_TABLE = '添加表格'
 ACTION_FILL_TABLE = '自动填单元格'
+ACTION_CUSTOM_JS = '执行JavaScript命令'
 
 STEP_ACTIONS = [
     ACTION_CLICK,
@@ -101,6 +102,7 @@ STEP_ACTIONS = [
     ACTION_PAGE_CONDITION,
     ACTION_ADD_TABLE,
     ACTION_FILL_TABLE,
+    ACTION_CUSTOM_JS,
 ]
 
 LOCATOR_TYPES = ['id', 'name', 'xpath', 'css selector', 'class name', 'tag name', 'link text', 'partial link text']
@@ -160,7 +162,7 @@ class BrowserFlowWindow(QMainWindow):
         self.debug_port_edit = QLineEdit('9222')
         self.start_url_edit = QLineEdit()
         self.start_url_edit.editingFinished.connect(self.normalize_start_url_input)
-        self.implicit_wait_edit = QLineEdit('2')
+        self.implicit_wait_edit = QLineEdit('0.5')
 
         browser_layout.addWidget(QLabel('chromedriver:'), 0, 0)
         browser_layout.addWidget(self.chromedriver_edit, 0, 1, 1, 3)
@@ -565,7 +567,7 @@ class BrowserFlowWindow(QMainWindow):
             'debug_address': '127.0.0.1:9222',
             'debug_port': 9222,
             'start_url': '',
-            'implicit_wait': 2,
+            'implicit_wait': 0.5,
         }
 
     def _default_flow(self):
@@ -657,14 +659,14 @@ class BrowserFlowWindow(QMainWindow):
             'chrome_binary': browser_settings.get('chrome_binary', browser.get('chrome_binary', '')),
             'debug_port': self._parse_int_value(str(browser_settings.get('debug_port', browser.get('debug_port', 9222))), 9222, '调试端口'),
             'start_url': self.engine.normalize_url(browser_settings.get('start_url', browser.get('start_url', ''))),
-            'implicit_wait': self._parse_float_value(str(browser_settings.get('implicit_wait', browser.get('implicit_wait', 2))), 2.0, '隐式等待'),
+            'implicit_wait': self._parse_float_value(str(browser_settings.get('implicit_wait', browser.get('implicit_wait', 0.5))), 0.5, '隐式等待'),
         })
 
         _set_text(self.chromedriver_edit, browser.get('chromedriver_path', ''))
         _set_text(self.chrome_binary_edit, browser.get('chrome_binary', ''))
         _set_text(self.debug_port_edit, browser.get('debug_port', 9222))
         _set_text(self.start_url_edit, browser.get('start_url', ''))
-        _set_text(self.implicit_wait_edit, browser.get('implicit_wait', 2))
+        _set_text(self.implicit_wait_edit, browser.get('implicit_wait', 0.5))
 
         try:
             loaded = json.loads(self._loaded_signature) if self._loaded_signature else self._default_flow()
@@ -681,7 +683,7 @@ class BrowserFlowWindow(QMainWindow):
             'chrome_binary': self.chrome_binary_edit.text().strip(),
             'debug_port': self._parse_int_value(self.debug_port_edit.text(), 9222, '调试端口', strict=strict),
             'start_url': self.engine.normalize_url(self.start_url_edit.text()),
-            'implicit_wait': self._parse_float_value(self.implicit_wait_edit.text(), 2.0, '隐式等待', strict=strict),
+            'implicit_wait': self._parse_float_value(self.implicit_wait_edit.text(), 0.5, '隐式等待', strict=strict),
         }
 
     def on_window_selection_changed(self, index):
@@ -713,7 +715,7 @@ class BrowserFlowWindow(QMainWindow):
         self.chrome_binary_edit.setText(browser.get('chrome_binary', ''))
         self.debug_port_edit.setText(str(browser.get('debug_port', 9222)))
         self.start_url_edit.setText(browser.get('start_url', ''))
-        self.implicit_wait_edit.setText(str(browser.get('implicit_wait', 2)))
+        self.implicit_wait_edit.setText(str(browser.get('implicit_wait', 0.5)))
         self.refresh_field_combo()
         self.refresh_step_list()
         self.refresh_windows()
@@ -957,8 +959,9 @@ class BrowserFlowWindow(QMainWindow):
             ACTION_RIGHT_CLICK_MENU, ACTION_DROPDOWN_TWO_STAGE, ACTION_WAIT_ELEMENT,
             ACTION_WAIT_ELEMENT_GONE, ACTION_SWITCH_IFRAME, ACTION_DRAG,
             ACTION_PAGE_CONDITION, ACTION_ADD_TABLE, ACTION_FILL_TABLE, ACTION_KEY_COMBO,
+            ACTION_CUSTOM_JS,
         )
-        value_needed = action in (ACTION_INPUT, ACTION_MULTI_SELECT, ACTION_KEY_COMBO, ACTION_FILL_TABLE)
+        value_needed = action in (ACTION_INPUT, ACTION_MULTI_SELECT, ACTION_KEY_COMBO, ACTION_FILL_TABLE, ACTION_CUSTOM_JS)
         target_needed = action in (ACTION_DRAG, ACTION_RIGHT_CLICK_MENU, ACTION_DROPDOWN_TWO_STAGE)
         window_needed = action == ACTION_SWITCH_WINDOW
         sleep_needed = action == ACTION_SLEEP
