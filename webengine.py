@@ -587,6 +587,20 @@ class BrowserEngine:
         self._click_element(step.get('target_locator_type', ''), step.get('target_locator_value', ''), timeout=timeout)
         return True
 
+    @classmethod
+    def render_javascript_template(cls, script: str, payload: dict) -> str:
+        """渲染执行 JavaScript 命令专用占位符。
+
+        JS 代码自身大量使用 {bubbles:true} 这类对象字面量，不能沿用普通
+        {字段名}/#表达式# 模板替换。这里仅替换 [[字段名]]、[[__RESULT__]]，
+        其它动作的模板替换规则保持不变。
+        """
+        def replace(match):
+            key = match.group(1).strip()
+            value = cls._payload_lookup_static(payload or {}, key)
+            return '' if value is None else str(value)
+        return re.sub(r'\[\[([^\[\]]+)\]\]', replace, str(script or ''))
+
     def _execute_custom_javascript(self, step: dict, payload: dict, timeout: float = 10):
         """执行浏览器步骤中的自定义 JavaScript。
 
@@ -595,9 +609,9 @@ class BrowserEngine:
         Ext.getCmp(arguments[0].id).fireHandler()
 
         如果没有填写定位值，则直接在当前页面执行脚本，此时 payload 作为
-        arguments[0] 传入。
+        arguments[0] 传入。JS 命令只支持 [[字段名]] 形式的专用占位符。
         """
-        script = self.render_value_template(step.get('value_template', ''), payload).strip()
+        script = self.render_javascript_template(step.get('value_template', ''), payload).strip()
         if not script:
             raise BrowserEngineError('执行JavaScript命令不能为空')
         locator_value = str(step.get('locator_value', '') or '').strip()
@@ -612,6 +626,39 @@ class BrowserEngine:
             self._scroll_into_view(element)
             return self.driver.execute_script(script, element, payload or {})
         return self.driver.execute_script(script, payload or {})
+
+    def _mouse_multi_click(self, step: dict, timeout: float = 10):
+        """执行左键/右键鼠标连击，次数限制在 1-20 次。"""
+        element = self._retry_find_element(
+            step.get('locator_type', ''),
+            step.get('locator_value', ''),
+            timeout=self._quick_action_timeout(timeout),
+            clickable=True,
+            attempts=1,
+        )
+        self._scroll_into_view(element)
+        try:
+            count = int(step.get('mouse_click_count', 2) or 2)
+        except Exception:
+            count = 2
+        count = max(1, min(20, count))
+        button_mode = str(step.get('mouse_click_button', '左键连击') or '左键连击')
+        actions = ActionChains(self.driver).move_to_element(element).pause(0.05)
+        if button_mode == '右键连击':
+            for index in range(count):
+                actions.context_click(element)
+                if index < count - 1:
+                    actions.pause(0.08)
+        else:
+            if count == 2:
+                actions.double_click(element)
+            else:
+                for index in range(count):
+                    actions.click(element)
+                    if index < count - 1:
+                        actions.pause(0.08)
+        actions.perform()
+        return True
 
     def _input_text(self, locator_type: str, locator_value: str, value: str, timeout: float = 10, clear_before_input: bool = True):
         element = self._retry_find_element(locator_type, locator_value, timeout=self._quick_action_timeout(timeout), clickable=False, attempts=1)
@@ -1623,6 +1670,10 @@ class BrowserEngine:
                 js_result = self._execute_custom_javascript(step, payload, timeout=timeout)
                 if js_result not in (None, ''):
                     self._log(logger, f'JavaScript执行结果：{js_result}')
+
+            elif action == '鼠标连击':
+                self._mouse_multi_click(step, timeout=timeout)
+                context['last_window_count'] = len(self.driver.window_handles)
 
             elif action == '拖拽元素':
                 self._drag_drop_element(step, timeout=timeout)

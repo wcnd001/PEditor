@@ -80,6 +80,7 @@ ACTION_PAGE_CONDITION = '页面条件判断'
 ACTION_ADD_TABLE = '添加表格'
 ACTION_FILL_TABLE = '自动填单元格'
 ACTION_CUSTOM_JS = '执行JavaScript命令'
+ACTION_MOUSE_MULTI_CLICK = '鼠标连击'
 
 STEP_ACTIONS = [
     ACTION_CLICK,
@@ -103,6 +104,7 @@ STEP_ACTIONS = [
     ACTION_ADD_TABLE,
     ACTION_FILL_TABLE,
     ACTION_CUSTOM_JS,
+    ACTION_MOUSE_MULTI_CLICK,
 ]
 
 LOCATOR_TYPES = ['id', 'name', 'xpath', 'css selector', 'class name', 'tag name', 'link text', 'partial link text']
@@ -293,7 +295,7 @@ class BrowserFlowWindow(QMainWindow):
         drag_offset_layout.addWidget(self.drag_offset_y_spin)
         drag_offset_layout.addStretch()
         self.value_template_edit = QPlainTextEdit()
-        self.value_template_edit.setPlaceholderText('可使用 {字段名}、{__RESULT__}、{__NL__} 或 #if(...)#')
+        self.value_template_edit.setPlaceholderText('普通动作可使用 {字段名}、{__RESULT__}、#if(...)#；执行JavaScript命令请使用 [[字段名]]、[[__RESULT__]]')
         self.page_condition_expr_edit = QLineEdit()
         self.page_condition_expr_edit.setPlaceholderText('页面条件判断时可填表达式；留空则按元素定位检测')
         self.detect_mode_combo = QComboBox()
@@ -313,6 +315,19 @@ class BrowserFlowWindow(QMainWindow):
         self.clear_before_input_check = QCheckBox('输入前清空原值')
         self.clear_before_input_check.setChecked(True)
         self.wait_clickable_check = QCheckBox('等待元素时要求可点击')
+        self.mouse_click_widget = QWidget()
+        mouse_click_layout = QHBoxLayout(self.mouse_click_widget)
+        mouse_click_layout.setContentsMargins(0, 0, 0, 0)
+        mouse_click_layout.addWidget(QLabel('按键:'))
+        self.mouse_click_button_combo = QComboBox()
+        self.mouse_click_button_combo.addItems(['左键连击', '右键连击'])
+        mouse_click_layout.addWidget(self.mouse_click_button_combo)
+        mouse_click_layout.addWidget(QLabel('次数:'))
+        self.mouse_click_count_spin = QSpinBox()
+        self.mouse_click_count_spin.setRange(1, 20)
+        self.mouse_click_count_spin.setValue(2)
+        mouse_click_layout.addWidget(self.mouse_click_count_spin)
+        mouse_click_layout.addStretch()
         self.note_edit = QPlainTextEdit()
         self.newline_mode_combo = QComboBox()
         self.newline_mode_combo.addItems(NEWLINE_MODES)
@@ -324,7 +339,7 @@ class BrowserFlowWindow(QMainWindow):
         self.insert_field_btn = QPushButton('插入字段')
         self.insert_field_btn.clicked.connect(self.insert_selected_field)
         self.insert_result_btn = QPushButton('插入{__RESULT__}')
-        self.insert_result_btn.clicked.connect(lambda: self.insert_template_text('{__RESULT__}'))
+        self.insert_result_btn.clicked.connect(self.insert_result_placeholder)
 
         self.field_insert_widget = QWidget()
         field_row = QHBoxLayout(self.field_insert_widget)
@@ -390,6 +405,7 @@ class BrowserFlowWindow(QMainWindow):
         form.addRow('窗口匹配方式:', self.window_match_type_combo)
         form.addRow('窗口匹配值:', self.window_match_value_edit)
         form.addRow('延时秒数:', self.sleep_seconds_spin)
+        form.addRow('连击设置:', self.mouse_click_widget)
         form.addRow(self.use_js_click_check)
         form.addRow(self.clear_before_input_check)
         form.addRow(self.wait_clickable_check)
@@ -797,6 +813,8 @@ class BrowserFlowWindow(QMainWindow):
             'use_js_click': False,
             'clear_before_input': True,
             'wait_clickable': False,
+            'mouse_click_button': '左键连击',
+            'mouse_click_count': 2,
             'note': '',
         }
         step.update(overrides)
@@ -834,6 +852,8 @@ class BrowserFlowWindow(QMainWindow):
         self.use_js_click_check.setChecked(bool(step.get('use_js_click', False)))
         self.clear_before_input_check.setChecked(bool(step.get('clear_before_input', True)))
         self.wait_clickable_check.setChecked(bool(step.get('wait_clickable', False)))
+        self.mouse_click_button_combo.setCurrentText(step.get('mouse_click_button', '左键连击'))
+        self.mouse_click_count_spin.setValue(max(1, min(20, int(step.get('mouse_click_count', 2) or 2))))
         self.note_edit.setPlainText(step.get('note', ''))
         self._loading_step = False
         self.update_action_visibility(self.action_combo.currentText())
@@ -903,6 +923,8 @@ class BrowserFlowWindow(QMainWindow):
         self.use_js_click_check.setChecked(bool(step.get('use_js_click', False)))
         self.clear_before_input_check.setChecked(bool(step.get('clear_before_input', True)))
         self.wait_clickable_check.setChecked(bool(step.get('wait_clickable', False)))
+        self.mouse_click_button_combo.setCurrentText(step.get('mouse_click_button', '左键连击'))
+        self.mouse_click_count_spin.setValue(max(1, min(20, int(step.get('mouse_click_count', 2) or 2))))
         self.note_edit.setPlainText(step.get('note', ''))
         self._loading_step = False
         self.update_action_visibility(self.action_combo.currentText())
@@ -938,6 +960,8 @@ class BrowserFlowWindow(QMainWindow):
             use_js_click=self.use_js_click_check.isChecked(),
             clear_before_input=self.clear_before_input_check.isChecked(),
             wait_clickable=self.wait_clickable_check.isChecked(),
+            mouse_click_button=self.mouse_click_button_combo.currentText(),
+            mouse_click_count=self.mouse_click_count_spin.value(),
             note=self.note_edit.toPlainText(),
         )
 
@@ -959,7 +983,7 @@ class BrowserFlowWindow(QMainWindow):
             ACTION_RIGHT_CLICK_MENU, ACTION_DROPDOWN_TWO_STAGE, ACTION_WAIT_ELEMENT,
             ACTION_WAIT_ELEMENT_GONE, ACTION_SWITCH_IFRAME, ACTION_DRAG,
             ACTION_PAGE_CONDITION, ACTION_ADD_TABLE, ACTION_FILL_TABLE, ACTION_KEY_COMBO,
-            ACTION_CUSTOM_JS,
+            ACTION_CUSTOM_JS, ACTION_MOUSE_MULTI_CLICK,
         )
         value_needed = action in (ACTION_INPUT, ACTION_MULTI_SELECT, ACTION_KEY_COMBO, ACTION_FILL_TABLE, ACTION_CUSTOM_JS)
         target_needed = action in (ACTION_DRAG, ACTION_RIGHT_CLICK_MENU, ACTION_DROPDOWN_TWO_STAGE)
@@ -967,6 +991,7 @@ class BrowserFlowWindow(QMainWindow):
         sleep_needed = action == ACTION_SLEEP
         drag_needed = action == ACTION_DRAG
         detect_needed = action == ACTION_PAGE_CONDITION
+        mouse_click_needed = action == ACTION_MOUSE_MULTI_CLICK
 
         self._set_form_row_visible(self.locator_type_combo, locator_needed)
         self._set_form_row_visible(self.locator_value_edit, locator_needed)
@@ -987,19 +1012,38 @@ class BrowserFlowWindow(QMainWindow):
         self._set_form_row_visible(self.window_match_type_combo, window_needed)
         self._set_form_row_visible(self.window_match_value_edit, window_needed)
         self._set_form_row_visible(self.sleep_seconds_spin, sleep_needed)
+        self._set_form_row_visible(self.mouse_click_widget, mouse_click_needed)
         self.use_js_click_check.setVisible(action == ACTION_CLICK)
         self.clear_before_input_check.setVisible(action in (ACTION_INPUT, ACTION_FILL_TABLE))
         self.wait_clickable_check.setVisible(action in (ACTION_WAIT_ELEMENT, ACTION_WAIT_ELEMENT_GONE))
+        if action == ACTION_CUSTOM_JS:
+            self.value_template_edit.setPlaceholderText('JS 命令不会替换普通 {字段名}；需要字段值请使用 [[字段名]] 或 [[__RESULT__]]')
+            self.insert_result_btn.setText('插入[[__RESULT__]]')
+        else:
+            self.value_template_edit.setPlaceholderText('可使用 {字段名}、{__RESULT__}、{__NL__} 或 #if(...)#')
+            self.insert_result_btn.setText('插入{__RESULT__}')
 
     def insert_template_text(self, text):
         cursor = self.value_template_edit.textCursor()
         cursor.insertText(text)
         self.value_template_edit.setTextCursor(cursor)
 
+    def _template_placeholder_for_current_action(self, field):
+        field = str(field or '').strip()
+        if self.action_combo.currentText() == ACTION_CUSTOM_JS:
+            return f'[[{field}]]'
+        return f'{{{field}}}'
+
     def insert_selected_field(self):
         field = self.field_combo.currentText().strip()
         if field:
-            self.insert_template_text(f'{{{field}}}')
+            self.insert_template_text(self._template_placeholder_for_current_action(field))
+
+    def insert_result_placeholder(self):
+        if self.action_combo.currentText() == ACTION_CUSTOM_JS:
+            self.insert_template_text('[[__RESULT__]]')
+        else:
+            self.insert_template_text('{__RESULT__}')
 
     def launch_browser(self):
         try:
