@@ -758,6 +758,20 @@ class BrowserEngine:
             'END': Keys.END,
             'PAGEUP': Keys.PAGE_UP,
             'PAGEDOWN': Keys.PAGE_DOWN,
+            'INSERT': Keys.INSERT,
+            'INS': Keys.INSERT,
+            'F1': Keys.F1,
+            'F2': Keys.F2,
+            'F3': Keys.F3,
+            'F4': Keys.F4,
+            'F5': Keys.F5,
+            'F6': Keys.F6,
+            'F7': Keys.F7,
+            'F8': Keys.F8,
+            'F9': Keys.F9,
+            'F10': Keys.F10,
+            'F11': Keys.F11,
+            'F12': Keys.F12,
         }
         result = []
         for part in re.split(r'\s*\+\s*', str(text or '').strip()):
@@ -792,6 +806,66 @@ class BrowserEngine:
             except Exception:
                 element = self.driver.find_element(By.TAG_NAME, 'body')
         ActionChains(self.driver).send_keys_to_element(element, *keys).perform()
+        return True
+
+    def _focus_key_target(self, locator_type: str, locator_value: str, timeout: float = 10):
+        element = None
+        if str(locator_value or '').strip():
+            element = self._retry_find_element(locator_type, locator_value, timeout=self._quick_action_timeout(timeout), clickable=False, attempts=1)
+            self._scroll_into_view(element)
+            try:
+                ActionChains(self.driver).move_to_element(element).click(element).perform()
+            except Exception:
+                try:
+                    element.click()
+                except Exception:
+                    pass
+        else:
+            try:
+                element = self.driver.switch_to.active_element
+            except Exception:
+                element = None
+            if element is None:
+                try:
+                    element = self.driver.find_element(By.TAG_NAME, 'body')
+                except Exception:
+                    element = None
+        return element
+
+    def _send_select_all(self, locator_type: str = '', locator_value: str = '', timeout: float = 10):
+        self._focus_key_target(locator_type, locator_value, timeout=timeout)
+        ActionChains(self.driver).key_down(Keys.CONTROL).send_keys('a').key_up(Keys.CONTROL).perform()
+        return True
+
+    def _send_key_action(self, locator_type: str, locator_value: str, key_text: str, mode: str = '点按', hold_seconds: float = 1.0, timeout: float = 10):
+        keys = self._parse_key_combo(key_text)
+        if not keys:
+            raise BrowserEngineError('键盘按键不能为空')
+        self._focus_key_target(locator_type, locator_value, timeout=timeout)
+        mode = str(mode or '点按').strip()
+        try:
+            hold_seconds = float(hold_seconds or 1.0)
+        except Exception:
+            hold_seconds = 1.0
+        hold_seconds = max(0.1, min(30.0, hold_seconds))
+
+        actions = ActionChains(self.driver)
+        if mode == '长按':
+            for key in keys:
+                actions.key_down(key)
+            actions.pause(hold_seconds)
+            for key in reversed(keys):
+                actions.key_up(key)
+        else:
+            if len(keys) > 1:
+                for key in keys[:-1]:
+                    actions.key_down(key)
+                actions.send_keys(keys[-1])
+                for key in reversed(keys[:-1]):
+                    actions.key_up(key)
+            else:
+                actions.send_keys(keys[0])
+        actions.perform()
         return True
 
     def _drag_drop_element(self, step: dict, timeout: float = 10):
@@ -1457,6 +1531,8 @@ class BrowserEngine:
             'NL': '\n',
             '__BR__': '\n',
             '换行': '\n',
+            '__INDEX__': payload.get('__INDEX__', ''),
+            '__LOOP_INDEX__': payload.get('__LOOP_INDEX__', ''),
         }
         if key in special_map:
             return special_map.get(key, '')
@@ -1596,6 +1672,72 @@ class BrowserEngine:
             return
         element.send_keys(value)
 
+
+    @staticmethod
+    def _loop_action_supported(action: str) -> bool:
+        return action in ('点击元素', '输入文本', '执行JavaScript命令', '鼠标连击')
+
+    @staticmethod
+    def _coerce_loop_range(step: dict):
+        try:
+            start = int(step.get('loop_start', 1) or 1)
+        except Exception:
+            start = 1
+        try:
+            end = int(step.get('loop_end', start) or start)
+        except Exception:
+            end = start
+        step_value = 1 if end >= start else -1
+        indexes = list(range(start, end + step_value, step_value))
+        # 防止误填过大范围导致浏览器长时间执行。
+        if len(indexes) > 200:
+            raise BrowserEngineError('循环次数不能超过 200 次，请缩小循环范围')
+        return indexes
+
+    @staticmethod
+    def _replace_loop_index(text: str, index: int, marker: str = '[[i]]', replace_xpath_number: bool = False) -> str:
+        text = '' if text is None else str(text)
+        marker = str(marker or '[[i]]')
+        if marker and marker in text:
+            return text.replace(marker, str(index))
+        if replace_xpath_number:
+            # 兼容用户直接写 //a[1]，循环 1-10 时自动替换第一个纯数字下标。
+            return re.sub(r'\[(\d+)\]', f'[{index}]', text, count=1)
+        return text
+
+    def _loop_payload(self, payload: dict, index: int) -> dict:
+        result = dict(payload or {})
+        result['__INDEX__'] = index
+        result['__LOOP_INDEX__'] = index
+        for bucket_name in ('input_values', 'final_fields', 'data_pool'):
+            bucket = dict((result.get(bucket_name) or {}))
+            bucket['__INDEX__'] = index
+            bucket['__LOOP_INDEX__'] = index
+            result[bucket_name] = bucket
+        return result
+
+    def _expand_loop_step(self, action: str, step: dict, payload: dict):
+        if not step.get('loop_enabled') or not self._loop_action_supported(action):
+            yield dict(step), payload, None
+            return
+        indexes = self._coerce_loop_range(step)
+        values = list(step.get('loop_values', []) or [])
+        marker = step.get('loop_marker', '[[i]]') or '[[i]]'
+        base_locator = step.get('locator_value', '')
+        base_target_locator = step.get('target_locator_value', '')
+        base_value = step.get('value_template', '')
+        for offset, index in enumerate(indexes):
+            loop_step = dict(step)
+            loop_step['locator_value'] = self._replace_loop_index(base_locator, index, marker, replace_xpath_number=True)
+            loop_step['target_locator_value'] = self._replace_loop_index(base_target_locator, index, marker, replace_xpath_number=True)
+            row_value = values[offset] if offset < len(values) else ''
+            if str(row_value or '').strip():
+                loop_step['value_template'] = str(row_value)
+            else:
+                loop_step['value_template'] = base_value
+            loop_step['value_template'] = self._replace_loop_index(loop_step.get('value_template', ''), index, marker, replace_xpath_number=False)
+            yield loop_step, self._loop_payload(payload, index), index
+
     def execute_flow(self, flow_config: dict, payload: dict, logger=None, alert_handler=None):
         browser_cfg = (flow_config or {}).get('browser', {}) or {}
         self.ensure_connected(browser_cfg, logger=logger)
@@ -1638,13 +1780,19 @@ class BrowserEngine:
             next_index = idx + 1
 
             if action == '点击元素':
-                self._click_element(step.get('locator_type', ''), step.get('locator_value', ''), timeout=timeout, use_js_click=bool(step.get('use_js_click')))
-                context['last_window_count'] = len(self.driver.window_handles)
+                for loop_step, loop_payload, loop_index in self._expand_loop_step(action, step, payload):
+                    if loop_index is not None:
+                        self._log(logger, f'    循环序号：{loop_index}')
+                    self._click_element(loop_step.get('locator_type', ''), loop_step.get('locator_value', ''), timeout=timeout, use_js_click=bool(loop_step.get('use_js_click')))
+                    context['last_window_count'] = len(self.driver.window_handles)
 
             elif action == '输入文本':
-                value = self.render_value_template(step.get('value_template', ''), payload)
-                value = self.transform_input_value(value, step)
-                self._input_text(step.get('locator_type', ''), step.get('locator_value', ''), value, timeout=timeout, clear_before_input=bool(step.get('clear_before_input', True)))
+                for loop_step, loop_payload, loop_index in self._expand_loop_step(action, step, payload):
+                    if loop_index is not None:
+                        self._log(logger, f'    循环序号：{loop_index}')
+                    value = self.render_value_template(loop_step.get('value_template', ''), loop_payload)
+                    value = self.transform_input_value(value, loop_step)
+                    self._input_text(loop_step.get('locator_type', ''), loop_step.get('locator_value', ''), value, timeout=timeout, clear_before_input=bool(loop_step.get('clear_before_input', True)))
 
             elif action == '多选元素/多行选择':
                 rendered = self.render_value_template(step.get('value_template', ''), payload)
@@ -1656,9 +1804,22 @@ class BrowserEngine:
             elif action == '右键点击':
                 self._right_click_element(step.get('locator_type', ''), step.get('locator_value', ''), timeout=timeout)
 
-            elif action == '键盘组合键':
-                combo_text = self.render_value_template(step.get('value_template', ''), payload)
-                self._send_key_combo(step.get('locator_type', ''), step.get('locator_value', ''), combo_text, timeout=timeout)
+            elif action == '全选操作':
+                self._send_select_all(step.get('locator_type', ''), step.get('locator_value', ''), timeout=timeout)
+
+            elif action in ('键盘按键', '键盘组合键'):
+                key_text = self.render_value_template(step.get('value_template', ''), payload)
+                if action == '键盘组合键' and not step.get('keyboard_press_mode'):
+                    self._send_key_combo(step.get('locator_type', ''), step.get('locator_value', ''), key_text, timeout=timeout)
+                else:
+                    self._send_key_action(
+                        step.get('locator_type', ''),
+                        step.get('locator_value', ''),
+                        key_text,
+                        mode=step.get('keyboard_press_mode', '点按'),
+                        hold_seconds=step.get('keyboard_hold_seconds', 1.0),
+                        timeout=timeout,
+                    )
 
             elif action == '右键菜单项点击':
                 self._right_click_menu_item(step, timeout=timeout)
@@ -1667,13 +1828,19 @@ class BrowserEngine:
                 self._dropdown_two_stage(step, timeout=timeout)
 
             elif action == '执行JavaScript命令':
-                js_result = self._execute_custom_javascript(step, payload, timeout=timeout)
-                if js_result not in (None, ''):
-                    self._log(logger, f'JavaScript执行结果：{js_result}')
+                for loop_step, loop_payload, loop_index in self._expand_loop_step(action, step, payload):
+                    if loop_index is not None:
+                        self._log(logger, f'    循环序号：{loop_index}')
+                    js_result = self._execute_custom_javascript(loop_step, loop_payload, timeout=timeout)
+                    if js_result not in (None, ''):
+                        self._log(logger, f'JavaScript执行结果：{js_result}')
 
             elif action == '鼠标连击':
-                self._mouse_multi_click(step, timeout=timeout)
-                context['last_window_count'] = len(self.driver.window_handles)
+                for loop_step, loop_payload, loop_index in self._expand_loop_step(action, step, payload):
+                    if loop_index is not None:
+                        self._log(logger, f'    循环序号：{loop_index}')
+                    self._mouse_multi_click(loop_step, timeout=timeout)
+                    context['last_window_count'] = len(self.driver.window_handles)
 
             elif action == '拖拽元素':
                 self._drag_drop_element(step, timeout=timeout)
@@ -1716,6 +1883,13 @@ class BrowserEngine:
                 self._log(logger, f'页面条件判断结果：{result_key}')
                 target_index = self._handle_branch_result(step, result_key, len(steps), logger=logger, alert_handler=alert_handler)
                 if target_index is not None:
+                    next_index = target_index
+
+            elif action == '跳转至步骤':
+                target = self._coerce_branch_step(step.get('jump_step', 0))
+                target_index = self._resolve_step_index(target, len(steps))
+                if target_index is not None:
+                    self._log(logger, f'跳转至步骤：{target_index + 1}')
                     next_index = target_index
 
             elif action == '添加表格':

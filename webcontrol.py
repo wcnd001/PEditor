@@ -1,3 +1,4 @@
+import copy
 import json
 from log import log_change
 from PyQt5.QtCore import Qt, QTimer, QEvent, QSize
@@ -29,6 +30,7 @@ from PyQt5.QtWidgets import (
     QWidget,
     QStyle,
     QApplication,
+    QSizePolicy,
 )
 
 from PyQt5.QtGui import QFontMetrics, QPalette
@@ -63,7 +65,9 @@ ACTION_CLICK = '点击元素'
 ACTION_INPUT = '输入文本'
 ACTION_MULTI_SELECT = '多选元素/多行选择'
 ACTION_RIGHT_CLICK = '右键点击'
-ACTION_KEY_COMBO = '键盘组合键'
+ACTION_KEY_COMBO = '键盘组合键'  # 兼容旧流程，界面新建步骤请使用“键盘按键”或“全选操作”
+ACTION_KEY_PRESS = '键盘按键'
+ACTION_SELECT_ALL = '全选操作'
 ACTION_RIGHT_CLICK_MENU = '右键菜单项点击'
 ACTION_DROPDOWN_TWO_STAGE = '下拉菜单两段式操作'
 ACTION_WAIT_ELEMENT = '等待元素'
@@ -81,13 +85,15 @@ ACTION_ADD_TABLE = '添加表格'
 ACTION_FILL_TABLE = '自动填单元格'
 ACTION_CUSTOM_JS = '执行JavaScript命令'
 ACTION_MOUSE_MULTI_CLICK = '鼠标连击'
+ACTION_JUMP_STEP = '跳转至步骤'
 
 STEP_ACTIONS = [
     ACTION_CLICK,
     ACTION_INPUT,
     ACTION_MULTI_SELECT,
     ACTION_RIGHT_CLICK,
-    ACTION_KEY_COMBO,
+    ACTION_SELECT_ALL,
+    ACTION_KEY_PRESS,
     ACTION_RIGHT_CLICK_MENU,
     ACTION_DROPDOWN_TWO_STAGE,
     ACTION_WAIT_ELEMENT,
@@ -105,6 +111,7 @@ STEP_ACTIONS = [
     ACTION_FILL_TABLE,
     ACTION_CUSTOM_JS,
     ACTION_MOUSE_MULTI_CLICK,
+    ACTION_JUMP_STEP,
 ]
 
 LOCATOR_TYPES = ['id', 'name', 'xpath', 'css selector', 'class name', 'tag name', 'link text', 'partial link text']
@@ -157,7 +164,11 @@ class BrowserFlowWindow(QMainWindow):
         main_layout = QVBoxLayout(central)
 
         browser_group = QGroupBox('浏览器连接')
-        browser_layout = QGridLayout(browser_group)
+        self.browser_connection_group = browser_group
+        browser_layout = QVBoxLayout(browser_group)
+        browser_layout.setContentsMargins(8, 8, 8, 8)
+        browser_layout.setSpacing(4)
+        self._browser_connection_labels = []
 
         self.chromedriver_edit = QLineEdit()
         self.chrome_binary_edit = QLineEdit()
@@ -165,19 +176,56 @@ class BrowserFlowWindow(QMainWindow):
         self.start_url_edit = QLineEdit()
         self.start_url_edit.editingFinished.connect(self.normalize_start_url_input)
         self.implicit_wait_edit = QLineEdit('0.5')
+        for edit in (self.chromedriver_edit, self.chrome_binary_edit, self.start_url_edit, self.debug_port_edit, self.implicit_wait_edit):
+            # 让浏览器连接区输入框按当前可用宽度动态填充，右侧贴近连接框右边界。
+            edit.setMinimumWidth(80)
+            edit.setMaximumWidth(16777215)
+            edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        browser_layout.addWidget(QLabel('chromedriver:'), 0, 0)
-        browser_layout.addWidget(self.chromedriver_edit, 0, 1, 1, 3)
-        browser_layout.addWidget(QLabel('Chrome路径:'), 1, 0)
-        browser_layout.addWidget(self.chrome_binary_edit, 1, 1, 1, 3)
-        browser_layout.addWidget(QLabel('启动网址:'), 2, 0)
-        browser_layout.addWidget(self.start_url_edit, 2, 1, 1, 3)
-        browser_layout.addWidget(QLabel('调试端口:'), 3, 0)
-        browser_layout.addWidget(self.debug_port_edit, 3, 1)
-        browser_layout.addWidget(QLabel('隐式等待(秒):'), 3, 2)
-        browser_layout.addWidget(self.implicit_wait_edit, 3, 3)
+        def add_browser_label(row_layout, text):
+            label = QLabel(text)
+            label.setWordWrap(True)
+            label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+            self._browser_connection_labels.append(label)
+            row_layout.addWidget(label, 0, Qt.AlignLeft | Qt.AlignVCenter)
+            return label
+
+        def add_browser_setting_row(label_text, edit_widget):
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
+            add_browser_label(row_layout, label_text)
+            row_layout.addWidget(edit_widget, 1, Qt.AlignVCenter)
+            browser_layout.addWidget(row)
+            return row
+
+        def add_browser_setting_pair_row(first_label, first_edit, second_label, second_edit):
+            """同一行放置两组浏览器参数。
+
+            每个标签仍按自身文字和浏览器连接区宽度计算宽度；
+            两个输入框分别吃掉所在半行的剩余空间，第二个输入框右侧贴近连接框右边界。
+            """
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
+            add_browser_label(row_layout, first_label)
+            row_layout.addWidget(first_edit, 1, Qt.AlignVCenter)
+            row_layout.addSpacing(8)
+            add_browser_label(row_layout, second_label)
+            row_layout.addWidget(second_edit, 1, Qt.AlignVCenter)
+            browser_layout.addWidget(row)
+            return row
+
+        add_browser_setting_row('chromedriver:', self.chromedriver_edit)
+        add_browser_setting_row('Chrome路径:', self.chrome_binary_edit)
+        add_browser_setting_row('启动网址:', self.start_url_edit)
+        add_browser_setting_pair_row('调试端口:', self.debug_port_edit, '隐式等待(秒):', self.implicit_wait_edit)
 
         btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 2, 0, 0)
         self.launch_btn = QPushButton('启动浏览器')
         self.launch_btn.clicked.connect(self.launch_browser)
         btn_row.addWidget(self.launch_btn)
@@ -190,27 +238,42 @@ class BrowserFlowWindow(QMainWindow):
         self.test_btn = QPushButton('测试导入')
         self.test_btn.clicked.connect(self.test_import)
         btn_row.addWidget(self.test_btn)
-        btn_row.addStretch()
-        browser_layout.addLayout(btn_row, 4, 0, 1, 4)
+        btn_row.addStretch(1)
+        browser_layout.addLayout(btn_row)
 
         window_row = QHBoxLayout()
+        window_row.setContentsMargins(0, 0, 0, 0)
         self.window_combo = QComboBox()
-        self.window_combo.setMinimumWidth(300)
+        self.window_combo.setMinimumWidth(260)
         self.window_combo.setMaximumWidth(420)
         self.window_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.window_combo.currentIndexChanged.connect(self.on_window_selection_changed)
-        window_row.addWidget(QLabel('已打开窗口:'))
-        window_row.addWidget(self.window_combo)
+        add_browser_label(window_row, '已打开窗口:')
+        window_row.addWidget(self.window_combo, 0, Qt.AlignLeft | Qt.AlignVCenter)
         self.switch_window_btn = QPushButton('使用选中窗口')
         self.switch_window_btn.clicked.connect(self.switch_selected_window)
         window_row.addWidget(self.switch_window_btn)
         self.add_window_step_btn = QPushButton('将选中窗口生成步骤')
         self.add_window_step_btn.clicked.connect(self.add_switch_window_step_from_selection)
         window_row.addWidget(self.add_window_step_btn)
-        window_row.addStretch()
-        browser_layout.addLayout(window_row, 5, 0, 1, 4)
+        window_row.addStretch(1)
+        browser_layout.addLayout(window_row)
 
-        main_layout.addWidget(browser_group)
+        elements_group = QGroupBox('自动录制结果（只读）')
+        eg_layout = QVBoxLayout(elements_group)
+        self.record_text = QPlainTextEdit()
+        self.record_text.setReadOnly(True)
+        self.record_text.setPlaceholderText('点击“自动录制”后，切换到浏览器点击目标元素，XPath / 推荐定位信息会显示在这里。\n当前录制结果只显示，不再自动填充步骤。')
+        eg_layout.addWidget(self.record_text, 1)
+
+        top_splitter = QSplitter(Qt.Horizontal)
+        top_splitter.setChildrenCollapsible(False)
+        top_splitter.addWidget(browser_group)
+        top_splitter.addWidget(elements_group)
+        top_splitter.setSizes([620, 520])
+        main_layout.addWidget(top_splitter)
+        self._update_browser_connection_label_widths()
+
         splitter = QSplitter(Qt.Horizontal)
         splitter.setChildrenCollapsible(False)
         main_layout.addWidget(splitter, 1)
@@ -227,6 +290,9 @@ class BrowserFlowWindow(QMainWindow):
         self.add_step_btn = QPushButton('新增步骤')
         self.add_step_btn.clicked.connect(self.add_step)
         step_btns.addWidget(self.add_step_btn)
+        self.copy_step_btn = QPushButton('复制步骤')
+        self.copy_step_btn.clicked.connect(self.copy_step)
+        step_btns.addWidget(self.copy_step_btn)
         self.del_step_btn = QPushButton('删除步骤')
         self.del_step_btn.clicked.connect(self.delete_step)
         step_btns.addWidget(self.del_step_btn)
@@ -239,10 +305,7 @@ class BrowserFlowWindow(QMainWindow):
         step_layout.addLayout(step_btns)
 
         save_btns = QHBoxLayout()
-        self.save_step_btn = QPushButton('应用当前步骤修改')
-        self.save_step_btn.clicked.connect(self.apply_current_step_changes)
-        save_btns.addWidget(self.save_step_btn)
-        self.save_flow_btn = QPushButton('保存流程配置')
+        self.save_flow_btn = QPushButton('手动保存流程')
         self.save_flow_btn.clicked.connect(self.save_flow)
         save_btns.addWidget(self.save_flow_btn)
         step_layout.addLayout(save_btns)
@@ -276,7 +339,11 @@ class BrowserFlowWindow(QMainWindow):
         self.action_combo.currentTextChanged.connect(self.update_action_visibility)
         self.locator_type_combo = QComboBox()
         self.locator_type_combo.addItems(LOCATOR_TYPES)
-        self.locator_value_edit = QLineEdit()
+        self.locator_value_edit = QPlainTextEdit()
+        self.locator_value_edit.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.locator_value_edit.setMinimumHeight(46)
+        self.locator_value_edit.setMaximumHeight(96)
+        self.locator_value_edit.setPlaceholderText('路径较长时可自动换行，支持循环标记 [[i]]，例如 //a[[i]]')
         self.target_locator_type_combo = QComboBox()
         self.target_locator_type_combo.addItems(LOCATOR_TYPES)
         self.target_locator_value_edit = QLineEdit()
@@ -328,6 +395,64 @@ class BrowserFlowWindow(QMainWindow):
         self.mouse_click_count_spin.setValue(2)
         mouse_click_layout.addWidget(self.mouse_click_count_spin)
         mouse_click_layout.addStretch()
+
+        self.keyboard_action_widget = QWidget()
+        keyboard_action_layout = QHBoxLayout(self.keyboard_action_widget)
+        keyboard_action_layout.setContentsMargins(0, 0, 0, 0)
+        keyboard_action_layout.addWidget(QLabel('方式:'))
+        self.keyboard_press_mode_combo = QComboBox()
+        self.keyboard_press_mode_combo.addItems(['点按', '长按'])
+        keyboard_action_layout.addWidget(self.keyboard_press_mode_combo)
+        keyboard_action_layout.addWidget(QLabel('长按秒数:'))
+        self.keyboard_hold_seconds_spin = QDoubleSpinBox()
+        self.keyboard_hold_seconds_spin.setRange(0.1, 30)
+        self.keyboard_hold_seconds_spin.setDecimals(1)
+        self.keyboard_hold_seconds_spin.setValue(1.0)
+        keyboard_action_layout.addWidget(self.keyboard_hold_seconds_spin)
+        keyboard_action_layout.addStretch()
+
+        self.jump_step_widget = QWidget()
+        jump_step_layout = QHBoxLayout(self.jump_step_widget)
+        jump_step_layout.setContentsMargins(0, 0, 0, 0)
+        jump_step_layout.addWidget(QLabel('跳转到第'))
+        self.jump_step_spin = QSpinBox()
+        self.jump_step_spin.setRange(1, 9999)
+        self.jump_step_spin.setValue(1)
+        jump_step_layout.addWidget(self.jump_step_spin)
+        jump_step_layout.addWidget(QLabel('步'))
+        jump_step_layout.addStretch()
+
+        self.loop_widget = QWidget()
+        loop_layout = QHBoxLayout(self.loop_widget)
+        loop_layout.setContentsMargins(0, 0, 0, 0)
+        self.loop_enabled_check = QCheckBox('启用循环')
+        loop_layout.addWidget(self.loop_enabled_check)
+        loop_layout.addWidget(QLabel('起始:'))
+        self.loop_start_spin = QSpinBox()
+        self.loop_start_spin.setRange(-9999, 9999)
+        self.loop_start_spin.setValue(1)
+        loop_layout.addWidget(self.loop_start_spin)
+        loop_layout.addWidget(QLabel('结束:'))
+        self.loop_end_spin = QSpinBox()
+        self.loop_end_spin.setRange(-9999, 9999)
+        self.loop_end_spin.setValue(1)
+        loop_layout.addWidget(self.loop_end_spin)
+        loop_layout.addWidget(QLabel('定位标记:'))
+        self.loop_marker_edit = QLineEdit('[[i]]')
+        self.loop_marker_edit.setMaximumWidth(90)
+        loop_layout.addWidget(self.loop_marker_edit)
+        self.loop_sync_table_btn = QPushButton('同步内容表')
+        self.loop_sync_table_btn.clicked.connect(self.sync_loop_value_table_rows)
+        loop_layout.addWidget(self.loop_sync_table_btn)
+        loop_layout.addStretch()
+
+        self.loop_value_table = QTableWidget(0, 2)
+        self.loop_value_table.setHorizontalHeaderLabels(['序号', '本轮输入/JS内容'])
+        self.loop_value_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.loop_value_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.loop_value_table.setMinimumHeight(90)
+        self.loop_value_table.setMaximumHeight(180)
+
         self.note_edit = QPlainTextEdit()
         self.newline_mode_combo = QComboBox()
         self.newline_mode_combo.addItems(NEWLINE_MODES)
@@ -406,6 +531,10 @@ class BrowserFlowWindow(QMainWindow):
         form.addRow('窗口匹配值:', self.window_match_value_edit)
         form.addRow('延时秒数:', self.sleep_seconds_spin)
         form.addRow('连击设置:', self.mouse_click_widget)
+        form.addRow('键盘设置:', self.keyboard_action_widget)
+        form.addRow('跳转目标:', self.jump_step_widget)
+        form.addRow('循环设置:', self.loop_widget)
+        form.addRow('循环内容表:', self.loop_value_table)
         form.addRow(self.use_js_click_check)
         form.addRow(self.clear_before_input_check)
         form.addRow(self.wait_clickable_check)
@@ -418,41 +547,22 @@ class BrowserFlowWindow(QMainWindow):
             self.step_scroll.installEventFilter(self)
         except Exception:
             pass
-        editor_layout.addWidget(self.step_scroll, 2)
-
         self.log_text = QPlainTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setPlaceholderText('浏览器连接、窗口切换、元素抓取日志会显示在这里。')
-        editor_layout.addWidget(self.log_text, 1)
-
-        elements_panel = QWidget()
-        elements_panel.setMinimumWidth(360)
-        elements_layout = QVBoxLayout(elements_panel)
-        elements_group = QGroupBox('自动录制结果（只读）')
-        eg_layout = QVBoxLayout(elements_group)
-        self.record_text = QPlainTextEdit()
-        self.record_text.setReadOnly(True)
-        self.record_text.setPlaceholderText('点击“自动录制”后，切换到浏览器点击目标元素，XPath / 推荐定位信息会显示在这里。')
-        eg_layout.addWidget(self.record_text, 1)
-        element_btns = QHBoxLayout()
-        self.apply_element_btn = QPushButton('将录制结果填入当前步骤')
-        self.apply_element_btn.clicked.connect(self.apply_selected_element_to_step)
-        element_btns.addWidget(self.apply_element_btn)
-        self.add_click_step_btn = QPushButton('用录制结果新增点击步骤')
-        self.add_click_step_btn.clicked.connect(lambda: self.add_step_from_element(default_action=ACTION_CLICK))
-        element_btns.addWidget(self.add_click_step_btn)
-        self.add_input_step_btn = QPushButton('用录制结果新增输入步骤')
-        self.add_input_step_btn.clicked.connect(lambda: self.add_step_from_element(default_action=ACTION_INPUT))
-        element_btns.addWidget(self.add_input_step_btn)
-        eg_layout.addLayout(element_btns)
-        elements_layout.addWidget(elements_group, 1)
+        editor_splitter = QSplitter(Qt.Vertical)
+        editor_splitter.setChildrenCollapsible(False)
+        editor_splitter.addWidget(self.step_scroll)
+        editor_splitter.addWidget(self.log_text)
+        editor_splitter.setSizes([620, 220])
+        editor_layout.addWidget(editor_splitter, 1)
 
         splitter.addWidget(step_panel)
         splitter.addWidget(editor_panel)
-        splitter.addWidget(elements_panel)
-        splitter.setSizes([300, 520, 420])
+        splitter.setSizes([300, 900])
         self.update_action_visibility(self.action_combo.currentText())
         self._update_step_form_widths()
+        self._connect_auto_save_signals()
 
 
     def _set_form_row_visible(self, field_widget, visible):
@@ -461,6 +571,33 @@ class BrowserFlowWindow(QMainWindow):
             label.setVisible(visible)
         field_widget.setVisible(visible)
 
+
+
+    def _update_browser_connection_label_widths(self):
+        """浏览器连接区标签按文字自适应，过长时最多占连接区宽度四分之一。"""
+        labels = getattr(self, '_browser_connection_labels', []) or []
+        if not labels:
+            return
+        try:
+            group_width = self.browser_connection_group.width() if hasattr(self, 'browser_connection_group') else self.width()
+        except Exception:
+            group_width = self.width()
+        max_width = max(60, int((group_width or 240) / 4))
+        for label in labels:
+            try:
+                label.setMaximumWidth(max_width)
+                metrics = label.fontMetrics()
+                try:
+                    natural = metrics.horizontalAdvance(label.text()) + 4
+                except AttributeError:
+                    natural = metrics.width(label.text()) + 4
+                label.setMinimumWidth(0)
+                label.setFixedWidth(min(max_width, max(1, int(natural))))
+                label.setWordWrap(natural > max_width)
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
 
     def _schedule_step_form_width_update(self):
         if getattr(self, '_step_form_width_update_pending', False):
@@ -477,6 +614,10 @@ class BrowserFlowWindow(QMainWindow):
         super().resizeEvent(event)
         try:
             self._schedule_step_form_width_update()
+        except Exception:
+            pass
+        try:
+            self._update_browser_connection_label_widths()
         except Exception:
             pass
 
@@ -738,19 +879,19 @@ class BrowserFlowWindow(QMainWindow):
         self._loaded_signature = self._signature(self.collect_flow())
 
     def collect_flow(self, strict=False):
-        self.apply_current_step_changes(silent=True)
+        self._save_current_editor_to_flow(auto=False, persist=False)
         browser = self._default_browser()
         browser.update(self._collect_browser_settings(strict=strict))
         steps = [dict(step) for step in (self.flow_config.get('steps', []) or [])]
         return {'browser': browser, 'steps': steps}
 
     def has_unsaved_changes(self):
-        self.apply_current_step_changes(silent=True)
+        self._save_current_editor_to_flow(auto=False, persist=False)
         return self._signature(self.collect_flow()) != self._loaded_signature
 
-    def save_flow(self):
+    def save_flow(self, silent=False):
         try:
-            self.apply_current_step_changes(silent=True)
+            self._save_current_editor_to_flow(auto=False, persist=False)
             self.flow_config = self.collect_flow(strict=True)
             old_flow = None
             try:
@@ -761,24 +902,30 @@ class BrowserFlowWindow(QMainWindow):
             self._loaded_signature = self._signature(self.flow_config)
             if old_flow != self.flow_config:
                 log_change(f'浏览器流程修改 - {self.template_name}', before=old_flow, after=self.flow_config)
-            self.log('浏览器流程配置已保存。')
-            QMessageBox.information(self, '成功', '浏览器流程配置已保存。')
+            if not silent:
+                self.log('浏览器流程配置已保存。')
+                QMessageBox.information(self, '成功', '浏览器流程配置已保存。')
             return True
         except Exception as e:
             self.log(f'保存浏览器流程配置失败：{e}')
-            QMessageBox.critical(self, '错误', f'保存浏览器流程配置失败：{e}')
+            if not silent:
+                QMessageBox.critical(self, '错误', f'保存浏览器流程配置失败：{e}')
             return False
 
-    def refresh_step_list(self):
-        self.step_list.clear()
-        steps = self.flow_config.get('steps', []) or []
-        for idx, step in enumerate(steps, start=1):
-            title = f"{idx}. {step.get('name') or step.get('action') or '未命名步骤'}"
-            item = QListWidgetItem(title)
-            item.setData(Qt.UserRole, step)
-            self.step_list.addItem(item)
+    def refresh_step_list(self, keep_row=None):
+        current = self.step_list.currentRow() if keep_row is None else keep_row
+        with signal_blocked(self.step_list):
+            self.step_list.clear()
+            steps = self.flow_config.get('steps', []) or []
+            for idx, step in enumerate(steps, start=1):
+                title = f"{idx}. {step.get('name') or step.get('action') or '未命名步骤'}"
+                item = QListWidgetItem(title)
+                item.setData(Qt.UserRole, step)
+                self.step_list.addItem(item)
         if self.step_list.count():
-            self.step_list.setCurrentRow(0)
+            if current is None or current < 0:
+                current = 0
+            self.step_list.setCurrentRow(max(0, min(current, self.step_list.count() - 1)))
         else:
             self.clear_step_editor()
 
@@ -815,19 +962,34 @@ class BrowserFlowWindow(QMainWindow):
             'wait_clickable': False,
             'mouse_click_button': '左键连击',
             'mouse_click_count': 2,
+            'keyboard_press_mode': '点按',
+            'keyboard_hold_seconds': 1.0,
+            'jump_step': 1,
+            'loop_enabled': False,
+            'loop_start': 1,
+            'loop_end': 1,
+            'loop_marker': '[[i]]',
+            'loop_values': [],
             'note': '',
         }
         step.update(overrides)
         return step
+
+    @staticmethod
+    def _normalize_action_for_ui(action):
+        # 兼容旧版流程中的“键盘组合键”，新界面统一显示为“键盘按键”。
+        if action == ACTION_KEY_COMBO:
+            return ACTION_KEY_PRESS
+        return action or ACTION_CLICK
 
     def clear_step_editor(self):
         self._loading_step = True
         step = self._new_step()
         self.step_name_edit.setText(step.get('name', ''))
         self.step_condition_edit.setText(step.get('condition_expr', ''))
-        self.action_combo.setCurrentText(step.get('action', ACTION_CLICK))
+        self.action_combo.setCurrentText(self._normalize_action_for_ui(step.get('action', ACTION_CLICK)))
         self.locator_type_combo.setCurrentText(step.get('locator_type', 'xpath'))
-        self.locator_value_edit.setText(step.get('locator_value', ''))
+        self.locator_value_edit.setPlainText(step.get('locator_value', ''))
         self.target_locator_type_combo.setCurrentText(step.get('target_locator_type', 'xpath'))
         self.target_locator_value_edit.setText(step.get('target_locator_value', ''))
         self.drop_position_combo.setCurrentText(step.get('drop_position', '中间'))
@@ -854,6 +1016,14 @@ class BrowserFlowWindow(QMainWindow):
         self.wait_clickable_check.setChecked(bool(step.get('wait_clickable', False)))
         self.mouse_click_button_combo.setCurrentText(step.get('mouse_click_button', '左键连击'))
         self.mouse_click_count_spin.setValue(max(1, min(20, int(step.get('mouse_click_count', 2) or 2))))
+        self.keyboard_press_mode_combo.setCurrentText(step.get('keyboard_press_mode', '点按') or '点按')
+        self.keyboard_hold_seconds_spin.setValue(float(step.get('keyboard_hold_seconds', 1.0) or 1.0))
+        self.jump_step_spin.setValue(max(1, int(step.get('jump_step', 1) or 1)))
+        self.loop_enabled_check.setChecked(bool(step.get('loop_enabled', False)))
+        self.loop_start_spin.setValue(int(step.get('loop_start', 1) or 1))
+        self.loop_end_spin.setValue(int(step.get('loop_end', 1) or 1))
+        self.loop_marker_edit.setText(step.get('loop_marker', '[[i]]') or '[[i]]')
+        self.set_loop_table_values(step.get('loop_values', []) or [])
         self.note_edit.setPlainText(step.get('note', ''))
         self._loading_step = False
         self.update_action_visibility(self.action_combo.currentText())
@@ -861,31 +1031,47 @@ class BrowserFlowWindow(QMainWindow):
     def add_step(self):
         step = self._new_step(name=f'步骤{len(self.flow_config.get("steps", [])) + 1}')
         self.flow_config.setdefault('steps', []).append(step)
-        self.refresh_step_list()
-        self.step_list.setCurrentRow(self.step_list.count() - 1)
+        self.refresh_step_list(keep_row=len(self.flow_config.get('steps', [])) - 1)
+        self._save_flow_config_silent()
 
     def delete_step(self):
         row = self.step_list.currentRow()
         if row < 0:
             return
         del self.flow_config['steps'][row]
-        self.refresh_step_list()
+        next_row = row - 1 if row > 0 else 0
+        self.refresh_step_list(keep_row=next_row)
+        self._save_flow_config_silent()
+
+    def copy_step(self):
+        row = self.step_list.currentRow()
+        steps = self.flow_config.setdefault('steps', [])
+        if not (0 <= row < len(steps)):
+            QMessageBox.information(self, '提示', '请先选择要复制的步骤。')
+            return
+        new_step = copy.deepcopy(steps[row])
+        base_name = str(new_step.get('name') or new_step.get('action') or f'步骤{row + 1}').strip()
+        new_step['name'] = base_name + '_复制'
+        insert_row = row + 1
+        steps.insert(insert_row, new_step)
+        self.refresh_step_list(keep_row=insert_row)
+        self._save_flow_config_silent()
 
     def move_step_up(self):
         row = self.step_list.currentRow()
         if row > 0:
             steps = self.flow_config['steps']
             steps[row - 1], steps[row] = steps[row], steps[row - 1]
-            self.refresh_step_list()
-            self.step_list.setCurrentRow(row - 1)
+            self.refresh_step_list(keep_row=row - 1)
+            self._save_flow_config_silent()
 
     def move_step_down(self):
         row = self.step_list.currentRow()
         steps = self.flow_config.get('steps', [])
         if 0 <= row < len(steps) - 1:
             steps[row + 1], steps[row] = steps[row], steps[row + 1]
-            self.refresh_step_list()
-            self.step_list.setCurrentRow(row + 1)
+            self.refresh_step_list(keep_row=row + 1)
+            self._save_flow_config_silent()
 
     def load_selected_step(self, row):
         steps = self.flow_config.get('steps', []) or []
@@ -896,9 +1082,9 @@ class BrowserFlowWindow(QMainWindow):
         self._loading_step = True
         self.step_name_edit.setText(step.get('name', ''))
         self.step_condition_edit.setText(step.get('condition_expr', ''))
-        self.action_combo.setCurrentText(step.get('action', ACTION_CLICK))
+        self.action_combo.setCurrentText(self._normalize_action_for_ui(step.get('action', ACTION_CLICK)))
         self.locator_type_combo.setCurrentText(step.get('locator_type', 'xpath'))
-        self.locator_value_edit.setText(step.get('locator_value', ''))
+        self.locator_value_edit.setPlainText(step.get('locator_value', ''))
         self.target_locator_type_combo.setCurrentText(step.get('target_locator_type', 'xpath'))
         self.target_locator_value_edit.setText(step.get('target_locator_value', ''))
         self.drop_position_combo.setCurrentText(step.get('drop_position', '中间'))
@@ -925,6 +1111,14 @@ class BrowserFlowWindow(QMainWindow):
         self.wait_clickable_check.setChecked(bool(step.get('wait_clickable', False)))
         self.mouse_click_button_combo.setCurrentText(step.get('mouse_click_button', '左键连击'))
         self.mouse_click_count_spin.setValue(max(1, min(20, int(step.get('mouse_click_count', 2) or 2))))
+        self.keyboard_press_mode_combo.setCurrentText(step.get('keyboard_press_mode', '点按') or '点按')
+        self.keyboard_hold_seconds_spin.setValue(float(step.get('keyboard_hold_seconds', 1.0) or 1.0))
+        self.jump_step_spin.setValue(max(1, int(step.get('jump_step', 1) or 1)))
+        self.loop_enabled_check.setChecked(bool(step.get('loop_enabled', False)))
+        self.loop_start_spin.setValue(int(step.get('loop_start', 1) or 1))
+        self.loop_end_spin.setValue(int(step.get('loop_end', 1) or 1))
+        self.loop_marker_edit.setText(step.get('loop_marker', '[[i]]') or '[[i]]')
+        self.set_loop_table_values(step.get('loop_values', []) or [])
         self.note_edit.setPlainText(step.get('note', ''))
         self._loading_step = False
         self.update_action_visibility(self.action_combo.currentText())
@@ -935,7 +1129,7 @@ class BrowserFlowWindow(QMainWindow):
             condition_expr=self.step_condition_edit.text().strip(),
             action=self.action_combo.currentText(),
             locator_type=self.locator_type_combo.currentText(),
-            locator_value=self.locator_value_edit.text().strip(),
+            locator_value=self.locator_value_edit.toPlainText().strip(),
             target_locator_type=self.target_locator_type_combo.currentText(),
             target_locator_value=self.target_locator_value_edit.text().strip(),
             drop_position=self.drop_position_combo.currentText(),
@@ -962,20 +1156,49 @@ class BrowserFlowWindow(QMainWindow):
             wait_clickable=self.wait_clickable_check.isChecked(),
             mouse_click_button=self.mouse_click_button_combo.currentText(),
             mouse_click_count=self.mouse_click_count_spin.value(),
+            keyboard_press_mode=self.keyboard_press_mode_combo.currentText(),
+            keyboard_hold_seconds=self.keyboard_hold_seconds_spin.value(),
+            jump_step=self.jump_step_spin.value(),
+            loop_enabled=self.loop_enabled_check.isChecked(),
+            loop_start=self.loop_start_spin.value(),
+            loop_end=self.loop_end_spin.value(),
+            loop_marker=self.loop_marker_edit.text().strip() or '[[i]]',
+            loop_values=self.get_loop_table_values(),
             note=self.note_edit.toPlainText(),
         )
 
     def apply_current_step_changes(self, silent=False):
-        if self._loading_step:
-            return
+        # 兼容旧入口。当前版本已改为编辑后自动保存，不再需要手动应用。
+        return self._save_current_editor_to_flow(auto=False, persist=True)
+
+    def _save_current_editor_to_flow(self, auto=True, persist=True):
+        if getattr(self, '_loading_step', False):
+            return False
         row = self.step_list.currentRow()
         if row < 0:
-            return
-        self.flow_config['steps'][row] = self.current_step_dict()
-        self.refresh_step_list()
-        self.step_list.setCurrentRow(row)
-        if not silent:
-            self.log('已应用当前步骤修改。')
+            return False
+        steps = self.flow_config.setdefault('steps', [])
+        if not (0 <= row < len(steps)):
+            return False
+        step = self.current_step_dict()
+        steps[row] = step
+        item = self.step_list.item(row)
+        if item is not None:
+            item.setText(f"{row + 1}. {step.get('name') or step.get('action') or '未命名步骤'}")
+            item.setData(Qt.UserRole, step)
+        if persist:
+            self._save_flow_config_silent()
+        return True
+
+    def _save_flow_config_silent(self):
+        try:
+            browser = self._default_browser()
+            browser.update(self._collect_browser_settings(strict=False))
+            self.flow_config = {'browser': browser, 'steps': [dict(step) for step in (self.flow_config.get('steps', []) or [])]}
+            self.template_db.update_browser_flow(self.template_name, self.flow_config)
+            self._loaded_signature = self._signature(self.flow_config)
+        except Exception as e:
+            self.log(f'自动保存浏览器流程失败：{e}')
 
     def update_action_visibility(self, action):
         locator_needed = action in (
@@ -983,15 +1206,18 @@ class BrowserFlowWindow(QMainWindow):
             ACTION_RIGHT_CLICK_MENU, ACTION_DROPDOWN_TWO_STAGE, ACTION_WAIT_ELEMENT,
             ACTION_WAIT_ELEMENT_GONE, ACTION_SWITCH_IFRAME, ACTION_DRAG,
             ACTION_PAGE_CONDITION, ACTION_ADD_TABLE, ACTION_FILL_TABLE, ACTION_KEY_COMBO,
-            ACTION_CUSTOM_JS, ACTION_MOUSE_MULTI_CLICK,
+            ACTION_KEY_PRESS, ACTION_SELECT_ALL, ACTION_CUSTOM_JS, ACTION_MOUSE_MULTI_CLICK,
         )
-        value_needed = action in (ACTION_INPUT, ACTION_MULTI_SELECT, ACTION_KEY_COMBO, ACTION_FILL_TABLE, ACTION_CUSTOM_JS)
+        value_needed = action in (ACTION_INPUT, ACTION_MULTI_SELECT, ACTION_KEY_COMBO, ACTION_KEY_PRESS, ACTION_FILL_TABLE, ACTION_CUSTOM_JS)
         target_needed = action in (ACTION_DRAG, ACTION_RIGHT_CLICK_MENU, ACTION_DROPDOWN_TWO_STAGE)
         window_needed = action == ACTION_SWITCH_WINDOW
         sleep_needed = action == ACTION_SLEEP
         drag_needed = action == ACTION_DRAG
         detect_needed = action == ACTION_PAGE_CONDITION
         mouse_click_needed = action == ACTION_MOUSE_MULTI_CLICK
+        keyboard_needed = action in (ACTION_KEY_PRESS, ACTION_KEY_COMBO)
+        jump_needed = action == ACTION_JUMP_STEP
+        loop_supported = action in (ACTION_CLICK, ACTION_INPUT, ACTION_CUSTOM_JS, ACTION_MOUSE_MULTI_CLICK)
 
         self._set_form_row_visible(self.locator_type_combo, locator_needed)
         self._set_form_row_visible(self.locator_value_edit, locator_needed)
@@ -1013,12 +1239,19 @@ class BrowserFlowWindow(QMainWindow):
         self._set_form_row_visible(self.window_match_value_edit, window_needed)
         self._set_form_row_visible(self.sleep_seconds_spin, sleep_needed)
         self._set_form_row_visible(self.mouse_click_widget, mouse_click_needed)
+        self._set_form_row_visible(self.keyboard_action_widget, keyboard_needed)
+        self._set_form_row_visible(self.jump_step_widget, jump_needed)
+        self._set_form_row_visible(self.loop_widget, loop_supported)
+        self._set_form_row_visible(self.loop_value_table, loop_supported and self.loop_enabled_check.isChecked())
         self.use_js_click_check.setVisible(action == ACTION_CLICK)
         self.clear_before_input_check.setVisible(action in (ACTION_INPUT, ACTION_FILL_TABLE))
         self.wait_clickable_check.setVisible(action in (ACTION_WAIT_ELEMENT, ACTION_WAIT_ELEMENT_GONE))
         if action == ACTION_CUSTOM_JS:
             self.value_template_edit.setPlaceholderText('JS 命令不会替换普通 {字段名}；需要字段值请使用 [[字段名]] 或 [[__RESULT__]]')
             self.insert_result_btn.setText('插入[[__RESULT__]]')
+        elif action in (ACTION_KEY_PRESS, ACTION_KEY_COMBO):
+            self.value_template_edit.setPlaceholderText('填写按键名，例如 ENTER、TAB、ESC、DELETE、BACKSPACE、UP、DOWN、LEFT、RIGHT、F2；也兼容 CTRL+A')
+            self.insert_result_btn.setText('插入{__RESULT__}')
         else:
             self.value_template_edit.setPlaceholderText('可使用 {字段名}、{__RESULT__}、{__NL__} 或 #if(...)#')
             self.insert_result_btn.setText('插入{__RESULT__}')
@@ -1044,6 +1277,73 @@ class BrowserFlowWindow(QMainWindow):
             self.insert_template_text('[[__RESULT__]]')
         else:
             self.insert_template_text('{__RESULT__}')
+
+
+    def get_loop_table_values(self):
+        values = []
+        for row in range(self.loop_value_table.rowCount()):
+            item = self.loop_value_table.item(row, 1)
+            values.append(item.text() if item is not None else '')
+        return values
+
+    def set_loop_table_values(self, values):
+        values = list(values or [])
+        self.loop_value_table.blockSignals(True)
+        try:
+            count = max(len(values), abs(int(self.loop_end_spin.value()) - int(self.loop_start_spin.value())) + 1 if self.loop_enabled_check.isChecked() else len(values))
+            self.loop_value_table.setRowCount(count)
+            start = int(self.loop_start_spin.value())
+            end = int(self.loop_end_spin.value())
+            step = 1 if end >= start else -1
+            indexes = list(range(start, end + step, step)) if count else []
+            for row in range(count):
+                index_text = str(indexes[row]) if row < len(indexes) else str(row + 1)
+                idx_item = QTableWidgetItem(index_text)
+                idx_item.setFlags(idx_item.flags() & ~Qt.ItemIsEditable)
+                self.loop_value_table.setItem(row, 0, idx_item)
+                self.loop_value_table.setItem(row, 1, QTableWidgetItem(values[row] if row < len(values) else ''))
+        finally:
+            self.loop_value_table.blockSignals(False)
+
+    def sync_loop_value_table_rows(self):
+        old_values = self.get_loop_table_values()
+        self.set_loop_table_values(old_values)
+        self._save_current_editor_to_flow(auto=True, persist=True)
+
+    def _connect_auto_save_signals(self):
+        widgets_text = [
+            self.step_name_edit, self.step_condition_edit, self.target_locator_value_edit,
+            self.page_condition_expr_edit, self.window_match_value_edit, self.loop_marker_edit,
+        ]
+        for widget in widgets_text:
+            widget.textChanged.connect(lambda *args: self._save_current_editor_to_flow(auto=True, persist=True))
+        self.locator_value_edit.textChanged.connect(lambda: self._save_current_editor_to_flow(auto=True, persist=True))
+        self.value_template_edit.textChanged.connect(lambda: self._save_current_editor_to_flow(auto=True, persist=True))
+        self.note_edit.textChanged.connect(lambda: self._save_current_editor_to_flow(auto=True, persist=True))
+        for combo in (
+            self.action_combo, self.locator_type_combo, self.target_locator_type_combo,
+            self.drop_position_combo, self.detect_mode_combo, self.newline_mode_combo,
+            self.tab_mode_combo, self.space_mode_combo, self.window_match_type_combo,
+            self.mouse_click_button_combo, self.keyboard_press_mode_combo,
+        ):
+            combo.currentTextChanged.connect(lambda *args: self._save_current_editor_to_flow(auto=True, persist=True))
+        for spin in (
+            self.drag_offset_x_spin, self.drag_offset_y_spin, self.wait_timeout_spin,
+            self.sleep_seconds_spin, self.on_found_step_spin, self.on_not_found_step_spin,
+            self.on_timeout_step_spin, self.mouse_click_count_spin,
+            self.keyboard_hold_seconds_spin, self.jump_step_spin,
+        ):
+            spin.valueChanged.connect(lambda *args: self._save_current_editor_to_flow(auto=True, persist=True))
+        for line in (self.on_found_message_edit, self.on_not_found_message_edit, self.on_timeout_message_edit):
+            line.textChanged.connect(lambda *args: self._save_current_editor_to_flow(auto=True, persist=True))
+        for check in (self.use_js_click_check, self.clear_before_input_check, self.wait_clickable_check):
+            check.stateChanged.connect(lambda *args: self._save_current_editor_to_flow(auto=True, persist=True))
+        self.loop_enabled_check.stateChanged.connect(lambda *args: (self.update_action_visibility(self.action_combo.currentText()), self.sync_loop_value_table_rows()))
+        self.loop_start_spin.valueChanged.connect(lambda *args: self.sync_loop_value_table_rows())
+        self.loop_end_spin.valueChanged.connect(lambda *args: self.sync_loop_value_table_rows())
+        self.loop_value_table.itemChanged.connect(lambda *args: self._save_current_editor_to_flow(auto=True, persist=True))
+        for edit in (self.chromedriver_edit, self.chrome_binary_edit, self.debug_port_edit, self.start_url_edit, self.implicit_wait_edit):
+            edit.textChanged.connect(lambda *args: self._save_flow_config_silent())
 
     def launch_browser(self):
         try:
@@ -1267,7 +1567,7 @@ class BrowserFlowWindow(QMainWindow):
             return
         locator_type, locator_value = self.choose_best_locator(element)
         action = self.action_combo.currentText()
-        target_mode = action == ACTION_DRAG and bool(self.locator_value_edit.text().strip()) and not bool(self.target_locator_value_edit.text().strip())
+        target_mode = action == ACTION_DRAG and bool(self.locator_value_edit.toPlainText().strip()) and not bool(self.target_locator_value_edit.text().strip())
         if action not in (ACTION_CLICK, ACTION_INPUT, ACTION_WAIT_ELEMENT, ACTION_SWITCH_IFRAME, ACTION_DRAG):
             action = ACTION_INPUT if element.get('tag') in ('input', 'textarea', 'select') else ACTION_CLICK
             self.action_combo.setCurrentText(action)
@@ -1277,7 +1577,7 @@ class BrowserFlowWindow(QMainWindow):
             self.log(f'已将录制结果填入拖拽目标：{locator_type} = {locator_value}')
             return
         self.locator_type_combo.setCurrentText(locator_type)
-        self.locator_value_edit.setText(locator_value)
+        self.locator_value_edit.setPlainText(locator_value)
         if not self.step_name_edit.text().strip():
             desc = element.get('text') or element.get('placeholder') or element.get('id') or element.get('name') or element.get('tag')
             self.step_name_edit.setText(f'{action}-{desc}')
