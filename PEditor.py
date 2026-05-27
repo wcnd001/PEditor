@@ -48,6 +48,8 @@ theme_color_fields = [
     ('color_handle_bg', '拖动柄背景'),
     ('color_handle_selected_bg', '选中拖动柄背景'),
     ('color_preview_bg', '预览框背景'),
+    ('color_table_header_bg', '表格标题行背景'),
+    ('color_table_header_text', '表格标题行文字'),
 ]
 
 theme_presets = {
@@ -64,6 +66,8 @@ theme_presets = {
         'color_handle_bg': '#f3f4f6',
         'color_handle_selected_bg': '#bfdbfe',
         'color_preview_bg': '#ffffff',
+        'color_table_header_bg': '#e5e7eb',
+        'color_table_header_text': '#111827',
     },
     '深色': {
         'color_window': '#111827',
@@ -78,6 +82,8 @@ theme_presets = {
         'color_handle_bg': '#374151',
         'color_handle_selected_bg': '#1d4ed8',
         'color_preview_bg': '#111827',
+        'color_table_header_bg': '#374151',
+        'color_table_header_text': '#f9fafb',
     },
     '护眼': {
         'color_window': '#eef6e8',
@@ -92,6 +98,8 @@ theme_presets = {
         'color_handle_bg': '#e8f3dc',
         'color_handle_selected_bg': '#bbf7d0',
         'color_preview_bg': '#fbfff5',
+        'color_table_header_bg': '#dbe8cc',
+        'color_table_header_text': '#1f2933',
     },
 }
 
@@ -2007,6 +2015,8 @@ class PEditor(QMainWindow):
             f"QScrollArea, QScrollArea > QWidget > QWidget {{ background-color: {colors['color_panel']}; }}\n"
             f"QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QListWidget, QTableWidget, QTableView, QSpinBox, QDoubleSpinBox {{ "
             f"background-color: {colors['color_input_bg']}; color: {colors['color_text']}; border: 1px solid {colors['color_border']}; }}\n"
+            f"QHeaderView::section {{ background-color: {colors['color_table_header_bg']}; color: {colors['color_table_header_text']}; border: 1px solid {colors['color_border']}; padding: 3px 5px; }}\n"
+            f"QTableCornerButton::section {{ background-color: {colors['color_table_header_bg']}; border: 1px solid {colors['color_border']}; }}\n"
             f"QPushButton, QToolButton {{ background-color: {colors['color_button_bg']}; color: {colors['color_button_text']}; "
             f"border: 1px solid {colors['color_border']}; border-radius: 3px; }}\n"
             f"QPushButton:hover, QToolButton:hover {{ border: 1px solid {colors['color_primary']}; }}\n"
@@ -2154,6 +2164,8 @@ class PEditor(QMainWindow):
                     f"QMainWindow, QDialog {{ background-color: {colors['color_window']}; }}"
                     f"QWidget {{ color: {colors['color_text']}; }}"
                     f"QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QListWidget, QTableWidget, QTableView, QSpinBox, QDoubleSpinBox {{ background-color: {colors['color_input_bg']}; color: {colors['color_text']}; border: 1px solid {colors['color_border']}; }}"
+                    f"QHeaderView::section {{ background-color: {colors['color_table_header_bg']}; color: {colors['color_table_header_text']}; border: 1px solid {colors['color_border']}; padding: 3px 5px; }}"
+                    f"QTableCornerButton::section {{ background-color: {colors['color_table_header_bg']}; border: 1px solid {colors['color_border']}; }}"
                     f"QPushButton, QToolButton {{ background-color: {colors['color_button_bg']}; color: {colors['color_button_text']}; border: 1px solid {colors['color_border']}; border-radius: 3px; }}"
                     f"QPushButton:hover, QToolButton:hover {{ border: 1px solid {colors['color_primary']}; }}"
                 )
@@ -2190,6 +2202,12 @@ class PEditor(QMainWindow):
                         try:
                             widget.verticalHeader().setDefaultSectionSize(max(min_height, base_size * 2 + compact * 2))
                             widget.horizontalHeader().setMinimumHeight(min_height)
+                            header_style = (
+                                f"QHeaderView::section {{ background-color: {colors['color_table_header_bg']}; color: {colors['color_table_header_text']}; "
+                                f"border: 1px solid {colors['color_border']}; padding: 3px 5px; }}"
+                            )
+                            widget.horizontalHeader().setStyleSheet(header_style)
+                            widget.verticalHeader().setStyleSheet(header_style)
                         except Exception:
                             pass
                 except RuntimeError:
