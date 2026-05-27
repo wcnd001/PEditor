@@ -1674,69 +1674,115 @@ class BrowserEngine:
 
 
     @staticmethod
-    def _loop_action_supported(action: str) -> bool:
-        return action in ('点击元素', '输入文本', '执行JavaScript命令', '鼠标连击')
+    def _normalize_loop_marker(marker: str) -> str:
+        marker = str(marker or '').strip()
+        if marker.startswith('[[') and marker.endswith(']]'):
+            marker = marker[2:-2].strip()
+        return marker or 'i'
 
     @staticmethod
-    def _coerce_loop_range(step: dict):
-        try:
-            start = int(step.get('loop_start', 1) or 1)
-        except Exception:
-            start = 1
-        try:
-            end = int(step.get('loop_end', start) or start)
-        except Exception:
-            end = start
-        step_value = 1 if end >= start else -1
-        indexes = list(range(start, end + step_value, step_value))
-        # 防止误填过大范围导致浏览器长时间执行。
-        if len(indexes) > 200:
-            raise BrowserEngineError('循环次数不能超过 200 次，请缩小循环范围')
-        return indexes
+    def _replace_loop_vars(text: str, variables: dict) -> str:
+        """替换定位值、模板里的循环变量占位符。
 
-    @staticmethod
-    def _replace_loop_index(text: str, index: int, marker: str = '[[i]]', replace_xpath_number: bool = False) -> str:
+        只替换当前循环上下文中已经存在的变量，例如 [[i]]、[[j]]。
+        对执行 JavaScript 命令中的 [[字段名]]，如果不是循环变量，会保留给
+        JS 专用渲染函数继续处理，避免误删字段占位符。
+        """
         text = '' if text is None else str(text)
-        marker = str(marker or '[[i]]')
-        if marker and marker in text:
-            return text.replace(marker, str(index))
-        if replace_xpath_number:
-            # 兼容用户直接写 //a[1]，循环 1-10 时自动替换第一个纯数字下标。
-            return re.sub(r'\[(\d+)\]', f'[{index}]', text, count=1)
-        return text
+        variables = {str(k): '' if v is None else str(v) for k, v in (variables or {}).items()}
 
-    def _loop_payload(self, payload: dict, index: int) -> dict:
+        def repl(match):
+            key = match.group(1).strip()
+            return variables.get(key, match.group(0))
+
+        return re.sub(r'\[\[([^\[\]]+)\]\]', repl, text)
+
+    @staticmethod
+    def _loop_variables_from_context(context: dict) -> dict:
+        variables = {}
+        for item in (context or {}).get('loop_stack') or []:
+            marker = BrowserEngine._normalize_loop_marker(item.get('marker', 'i'))
+            variables[marker] = int(item.get('current', item.get('start', 1)) or 1)
+            variables[f'__{marker}__'] = variables[marker]
+        if variables:
+            # 兼容旧写法：有 i 时也同步到 __INDEX__。
+            if 'i' in variables:
+                variables['__INDEX__'] = variables['i']
+                variables['__LOOP_INDEX__'] = variables['i']
+        return variables
+
+    def _loop_payload(self, payload: dict, variables: dict) -> dict:
         result = dict(payload or {})
-        result['__INDEX__'] = index
-        result['__LOOP_INDEX__'] = index
+        variables = dict(variables or {})
+        for key, value in variables.items():
+            result[key] = value
         for bucket_name in ('input_values', 'final_fields', 'data_pool'):
             bucket = dict((result.get(bucket_name) or {}))
-            bucket['__INDEX__'] = index
-            bucket['__LOOP_INDEX__'] = index
+            for key, value in variables.items():
+                bucket[key] = value
             result[bucket_name] = bucket
         return result
 
-    def _expand_loop_step(self, action: str, step: dict, payload: dict):
-        if not step.get('loop_enabled') or not self._loop_action_supported(action):
-            yield dict(step), payload, None
-            return
-        indexes = self._coerce_loop_range(step)
-        values = list(step.get('loop_values', []) or [])
-        marker = step.get('loop_marker', '[[i]]') or '[[i]]'
-        base_locator = step.get('locator_value', '')
-        base_target_locator = step.get('target_locator_value', '')
-        base_value = step.get('value_template', '')
-        for offset, index in enumerate(indexes):
-            loop_step = dict(step)
-            loop_step['locator_value'] = self._replace_loop_index(base_locator, index, marker, replace_xpath_number=True)
-            loop_step['target_locator_value'] = self._replace_loop_index(base_target_locator, index, marker, replace_xpath_number=True)
-            row_value = values[offset] if offset < len(values) else ''
-            if str(row_value or '').strip():
-                loop_step['value_template'] = str(row_value)
-            else:
-                loop_step['value_template'] = base_value
-            loop_step['value_template'] = self._replace_loop_index(loop_step.get('value_template', ''), index, marker, replace_xpath_number=False)
-            yield loop_step, self._loop_payload(payload, index), index
+    @staticmethod
+    def _current_loop_context(context: dict):
+        stack = (context or {}).get('loop_stack') or []
+        return stack[-1] if stack else None
+
+    @staticmethod
+    def _loop_row_as_dict(row_value, columns=None):
+        columns = [str(c).strip() for c in (columns or []) if str(c).strip()]
+        if isinstance(row_value, dict):
+            return {str(k).strip(): '' if v is None else str(v) for k, v in row_value.items() if str(k).strip()}
+        if columns:
+            return {columns[0]: '' if row_value is None else str(row_value)}
+        return {'内容': '' if row_value is None else str(row_value)}
+
+    @staticmethod
+    def _row_value_template(row_vars: dict, columns=None) -> str:
+        if not row_vars:
+            return ''
+        for key in ('内容', '输入内容', '参数内容', '__VALUE__', 'value', 'VALUE'):
+            if key in row_vars:
+                return str(row_vars.get(key, ''))
+        columns = [str(c).strip() for c in (columns or []) if str(c).strip()]
+        if columns:
+            return str(row_vars.get(columns[0], ''))
+        first_key = next(iter(row_vars.keys()), '')
+        return str(row_vars.get(first_key, '')) if first_key else ''
+
+    def _prepare_step_for_loop(self, step: dict, payload: dict, context: dict):
+        """按当前循环块上下文准备步骤副本。
+
+        支持多个循环标记，例如外层 [[i]]、内层 [[j]]。块内步骤执行前，
+        会将定位值、目标定位值、窗口匹配值、条件表达式、输入/JS 模板中的
+        当前循环标记替换为本轮值。
+
+        若步骤启用了循环内容表，表格第 N 行会注入到本轮 payload 中：
+        - 单列表格默认把第一列作为输入/参数模板。
+        - 多列表格按列名注入，可在定位值或 JS 中用 [[列名]] 引用。
+        """
+        loop_vars = self._loop_variables_from_context(context)
+        if not loop_vars:
+            return dict(step or {}), payload, None
+        loop_step = dict(step or {})
+        current_ctx = self._current_loop_context(context) or {}
+        current = int(current_ctx.get('current', current_ctx.get('start', 1)) or 1)
+        start = int(current_ctx.get('start', 1) or 1)
+        offset = max(0, current - start)
+        row_vars = {}
+        if loop_step.get('loop_enabled'):
+            values = list(loop_step.get('loop_values', []) or [])
+            columns = loop_step.get('loop_columns', []) or []
+            if offset < len(values):
+                row_vars = self._loop_row_as_dict(values[offset], columns)
+            loop_step['value_template'] = self._row_value_template(row_vars, columns)
+        merged_vars = dict(loop_vars)
+        merged_vars.update(row_vars)
+        for key in ('locator_value', 'target_locator_value', 'window_match_value', 'page_condition_expr', 'condition_expr', 'value_template'):
+            if key in loop_step:
+                loop_step[key] = self._replace_loop_vars(loop_step.get(key, ''), merged_vars)
+        label = ','.join(f'{k}={v}' for k, v in merged_vars.items() if not str(k).startswith('__'))
+        return loop_step, self._loop_payload(payload, merged_vars), label
 
     def execute_flow(self, flow_config: dict, payload: dict, logger=None, alert_handler=None):
         browser_cfg = (flow_config or {}).get('browser', {}) or {}
@@ -1762,17 +1808,35 @@ class BrowserEngine:
         context = {
             'main_handle': self.main_window_handle,
             'last_window_count': len(self.driver.window_handles),
+            'loop_stack': [],
         }
 
         idx = 0
         while idx < len(steps):
-            step = steps[idx] or {}
+            raw_step = steps[idx] or {}
+            raw_action = (raw_step.get('action') or '').strip()
+
+            if raw_action == '循环开始':
+                marker = self._normalize_loop_marker(raw_step.get('loop_marker', 'i'))
+                try:
+                    start_value = int(raw_step.get('loop_start', 1) or 1)
+                except Exception:
+                    start_value = 1
+                start_value = max(1, min(9999, start_value))
+                context.setdefault('loop_stack', []).append({'start_idx': idx, 'marker': marker, 'start': start_value, 'current': start_value})
+                name = (raw_step.get('name') or f'步骤{idx + 1}').strip()
+                self._log(logger, f'[{idx + 1}] {name} - 循环开始：{marker} = {start_value}')
+                idx += 1
+                continue
+
+            step, step_payload, loop_index = self._prepare_step_for_loop(raw_step, payload, context)
             action = (step.get('action') or '').strip()
             name = (step.get('name') or f'步骤{idx + 1}').strip()
             timeout = float(step.get('wait_timeout', 10) or 10)
-            self._log(logger, f'[{idx + 1}] {name} - {action}')
+            suffix = f'（{loop_index}）' if loop_index is not None and action != '循环结束' else ''
+            self._log(logger, f'[{idx + 1}] {name} - {action}{suffix}')
 
-            if not self.evaluate_condition_expression(step.get('condition_expr', ''), payload):
+            if not self.evaluate_condition_expression(step.get('condition_expr', ''), step_payload):
                 self._log(logger, f'[{idx + 1}] 已跳过：未满足执行条件')
                 idx += 1
                 continue
@@ -1780,22 +1844,16 @@ class BrowserEngine:
             next_index = idx + 1
 
             if action == '点击元素':
-                for loop_step, loop_payload, loop_index in self._expand_loop_step(action, step, payload):
-                    if loop_index is not None:
-                        self._log(logger, f'    循环序号：{loop_index}')
-                    self._click_element(loop_step.get('locator_type', ''), loop_step.get('locator_value', ''), timeout=timeout, use_js_click=bool(loop_step.get('use_js_click')))
-                    context['last_window_count'] = len(self.driver.window_handles)
+                self._click_element(step.get('locator_type', ''), step.get('locator_value', ''), timeout=timeout, use_js_click=bool(step.get('use_js_click')))
+                context['last_window_count'] = len(self.driver.window_handles)
 
             elif action == '输入文本':
-                for loop_step, loop_payload, loop_index in self._expand_loop_step(action, step, payload):
-                    if loop_index is not None:
-                        self._log(logger, f'    循环序号：{loop_index}')
-                    value = self.render_value_template(loop_step.get('value_template', ''), loop_payload)
-                    value = self.transform_input_value(value, loop_step)
-                    self._input_text(loop_step.get('locator_type', ''), loop_step.get('locator_value', ''), value, timeout=timeout, clear_before_input=bool(loop_step.get('clear_before_input', True)))
+                value = self.render_value_template(step.get('value_template', ''), step_payload)
+                value = self.transform_input_value(value, step)
+                self._input_text(step.get('locator_type', ''), step.get('locator_value', ''), value, timeout=timeout, clear_before_input=bool(step.get('clear_before_input', True)))
 
             elif action == '多选元素/多行选择':
-                rendered = self.render_value_template(step.get('value_template', ''), payload)
+                rendered = self.render_value_template(step.get('value_template', ''), step_payload)
                 locator_values = [line.strip() for line in str(rendered or '').splitlines() if line.strip()]
                 if not locator_values and str(step.get('locator_value', '') or '').strip():
                     locator_values = [str(step.get('locator_value', '')).strip()]
@@ -1808,7 +1866,7 @@ class BrowserEngine:
                 self._send_select_all(step.get('locator_type', ''), step.get('locator_value', ''), timeout=timeout)
 
             elif action in ('键盘按键', '键盘组合键'):
-                key_text = self.render_value_template(step.get('value_template', ''), payload)
+                key_text = self.render_value_template(step.get('value_template', ''), step_payload)
                 if action == '键盘组合键' and not step.get('keyboard_press_mode'):
                     self._send_key_combo(step.get('locator_type', ''), step.get('locator_value', ''), key_text, timeout=timeout)
                 else:
@@ -1828,19 +1886,13 @@ class BrowserEngine:
                 self._dropdown_two_stage(step, timeout=timeout)
 
             elif action == '执行JavaScript命令':
-                for loop_step, loop_payload, loop_index in self._expand_loop_step(action, step, payload):
-                    if loop_index is not None:
-                        self._log(logger, f'    循环序号：{loop_index}')
-                    js_result = self._execute_custom_javascript(loop_step, loop_payload, timeout=timeout)
-                    if js_result not in (None, ''):
-                        self._log(logger, f'JavaScript执行结果：{js_result}')
+                js_result = self._execute_custom_javascript(step, step_payload, timeout=timeout)
+                if js_result not in (None, ''):
+                    self._log(logger, f'JavaScript执行结果：{js_result}')
 
             elif action == '鼠标连击':
-                for loop_step, loop_payload, loop_index in self._expand_loop_step(action, step, payload):
-                    if loop_index is not None:
-                        self._log(logger, f'    循环序号：{loop_index}')
-                    self._mouse_multi_click(loop_step, timeout=timeout)
-                    context['last_window_count'] = len(self.driver.window_handles)
+                self._mouse_multi_click(step, timeout=timeout)
+                context['last_window_count'] = len(self.driver.window_handles)
 
             elif action == '拖拽元素':
                 self._drag_drop_element(step, timeout=timeout)
@@ -1879,11 +1931,39 @@ class BrowserEngine:
                 time.sleep(float(step.get('sleep_seconds', 1) or 1))
 
             elif action == '页面条件判断':
-                result_key = self._evaluate_page_condition(step, payload, timeout=timeout)
+                result_key = self._evaluate_page_condition(step, step_payload, timeout=timeout)
                 self._log(logger, f'页面条件判断结果：{result_key}')
                 target_index = self._handle_branch_result(step, result_key, len(steps), logger=logger, alert_handler=alert_handler)
                 if target_index is not None:
                     next_index = target_index
+
+            elif action == '循环结束':
+                stack = context.setdefault('loop_stack', [])
+                if not stack:
+                    raise BrowserEngineError('遇到“循环结束”，但前面没有对应的“循环开始”。')
+                end_marker = self._normalize_loop_marker(step.get('loop_marker', '') or stack[-1].get('marker', 'i'))
+                loop_pos = None
+                for pos in range(len(stack) - 1, -1, -1):
+                    if self._normalize_loop_marker(stack[pos].get('marker', 'i')) == end_marker:
+                        loop_pos = pos
+                        break
+                if loop_pos is None:
+                    raise BrowserEngineError(f'遇到“循环结束”，但没有找到对应循环标记：{end_marker}')
+                loop_ctx = stack[loop_pos]
+                try:
+                    stop = int(step.get('loop_stop', 1) or 1)
+                except Exception:
+                    stop = 1
+                stop = max(1, min(9999, stop))
+                current = int(loop_ctx.get('current', loop_ctx.get('start', 1)) or 1)
+                if current < stop:
+                    loop_ctx['current'] = current + 1
+                    next_index = int(loop_ctx.get('start_idx', idx)) + 1
+                    self._log(logger, f'循环继续：{end_marker} = {loop_ctx["current"]}')
+                else:
+                    # 正常嵌套时 loop_pos 应为栈顶。若用户跨层结束，移除该层及其内层，避免上下文残留。
+                    del stack[loop_pos:]
+                    self._log(logger, f'循环结束：{end_marker}')
 
             elif action == '跳转至步骤':
                 target = self._coerce_branch_step(step.get('jump_step', 0))
@@ -1896,7 +1976,7 @@ class BrowserEngine:
                 self._add_table(step.get('locator_type', ''), step.get('locator_value', ''), timeout=timeout)
 
             elif action == '自动填单元格':
-                table_text = self.render_value_template(step.get('value_template', ''), payload)
+                table_text = self.render_value_template(step.get('value_template', ''), step_payload)
                 self._fill_table_cells(step.get('locator_type', ''), step.get('locator_value', ''), table_text, timeout=timeout, clear_before_input=bool(step.get('clear_before_input', True)))
 
             else:
