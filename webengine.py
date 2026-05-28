@@ -1,3 +1,4 @@
+import json
 import re
 import time
 from decimal import Decimal, ROUND_HALF_UP, ROUND_UP
@@ -86,6 +87,9 @@ class BrowserEngine:
                 f'--remote-debugging-port={int(debug_port)}',
                 '--disable-popup-blocking',
                 '--start-maximized',
+                '--disable-background-timer-throttling',
+                '--disable-renderer-backgrounding',
+                '--disable-backgrounding-occluded-windows',
             ],
         )
         self.driver = self._create_driver(chromedriver_path, options)
@@ -592,14 +596,48 @@ class BrowserEngine:
         """渲染执行 JavaScript 命令专用占位符。
 
         JS 代码自身大量使用 {bubbles:true} 这类对象字面量，不能沿用普通
-        {字段名}/#表达式# 模板替换。这里仅替换 [[字段名]]、[[__RESULT__]]，
-        其它动作的模板替换规则保持不变。
+        {字段名}/#表达式# 模板替换。这里仅替换 [[字段名]]、[[__RESULT__]]。
+
+        3.8 起占位符会自动转换为合法 JavaScript 字符串字面量。推荐写法：
+            arguments[0].textContent = [[字段名]];
+        不再需要手动加引号；字段内容包含换行、引号、反引号时也不会破坏 JS。
         """
         def replace(match):
             key = match.group(1).strip()
             value = cls._payload_lookup_static(payload or {}, key)
-            return '' if value is None else str(value)
+            if value is None:
+                value = ''
+            return json.dumps(str(value), ensure_ascii=False)
         return re.sub(r'\[\[([^\[\]]+)\]\]', replace, str(script or ''))
+
+    def _clear_auto_numbering(self, locator_type: str = '', locator_value: str = '', timeout: float = 10):
+        """把编辑器中自动生成的 ol/ul > li 编号列表转换为普通 p 段落。"""
+        locator_value = str(locator_value or '').strip()
+        if locator_value:
+            root = self._retry_find_element(locator_type, locator_value, timeout=self._quick_action_timeout(timeout), clickable=False, attempts=1)
+        else:
+            root = self._retry_find_element('tag name', 'body', timeout=self._quick_action_timeout(timeout), clickable=False, attempts=1)
+        self._scroll_into_view(root)
+        script = """
+            var root = arguments[0];
+            Array.from(root.querySelectorAll('ol, ul')).forEach(function(list){
+                var fragment = document.createDocumentFragment();
+                Array.from(list.children).forEach(function(item){
+                    if (item && item.tagName && item.tagName.toLowerCase() === 'li') {
+                        var p = document.createElement('p');
+                        p.textContent = item.textContent || '';
+                        fragment.appendChild(p);
+                    }
+                });
+                if (list.parentNode) {
+                    list.parentNode.replaceChild(fragment, list);
+                }
+            });
+            root.dispatchEvent(new Event('input', {bubbles:true}));
+            root.dispatchEvent(new Event('change', {bubbles:true}));
+            return true;
+        """
+        return self.driver.execute_script(script, root)
 
     def _execute_custom_javascript(self, step: dict, payload: dict, timeout: float = 10):
         """执行浏览器步骤中的自定义 JavaScript。
@@ -1536,7 +1574,10 @@ class BrowserEngine:
         }
         if key in special_map:
             return special_map.get(key, '')
-        for bucket_name in ('data_pool', 'final_fields', 'input_values'):
+        # 浏览器步骤字段取值优先使用主界面复制按钮同源渲染结果。
+        # 原先 data_pool 排在 final_fields 前面，容易拿到未渲染公式文本，导致
+        # 浏览器导入出现 dbjoin 未定义、str 与 float 混算等与复制按钮不一致的问题。
+        for bucket_name in ('rendered_fields', 'final_fields', 'data_pool', 'input_values'):
             bucket = payload.get(bucket_name, {}) or {}
             if key in bucket:
                 return bucket.get(key)
@@ -1927,6 +1968,9 @@ class BrowserEngine:
                 js_result = self._execute_custom_javascript(step, step_payload, timeout=timeout)
                 if js_result not in (None, ''):
                     self._log(logger, f'JavaScript执行结果：{js_result}')
+
+            elif action in ('去除自动编号', '清除编号列表'):
+                self._clear_auto_numbering(step.get('locator_type', ''), step.get('locator_value', ''), timeout=timeout)
 
             elif action == '鼠标连击':
                 self._mouse_multi_click(step, timeout=timeout)

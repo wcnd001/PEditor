@@ -85,6 +85,7 @@ ACTION_PAGE_CONDITION = '页面条件判断'
 ACTION_ADD_TABLE = '添加表格'
 ACTION_FILL_TABLE = '自动填单元格'
 ACTION_CUSTOM_JS = '执行JavaScript命令'
+ACTION_CLEAR_NUMBERING = '去除自动编号'
 ACTION_MOUSE_MULTI_CLICK = '鼠标连击'
 ACTION_LOOP_START = '循环开始'
 ACTION_LOOP_END = '循环结束'
@@ -113,6 +114,7 @@ STEP_ACTIONS = [
     ACTION_ADD_TABLE,
     ACTION_FILL_TABLE,
     ACTION_CUSTOM_JS,
+    ACTION_CLEAR_NUMBERING,
     ACTION_MOUSE_MULTI_CLICK,
     ACTION_LOOP_START,
     ACTION_LOOP_END,
@@ -367,7 +369,7 @@ class BrowserFlowWindow(QMainWindow):
         drag_offset_layout.addWidget(self.drag_offset_y_spin)
         drag_offset_layout.addStretch()
         self.value_template_edit = QPlainTextEdit()
-        self.value_template_edit.setPlaceholderText('普通动作可使用 {字段名}、{__RESULT__}、#if(...)#；执行JavaScript命令请使用 [[字段名]]、[[__RESULT__]]')
+        self.value_template_edit.setPlaceholderText('普通动作可使用 {字段名}、{__RESULT__}、#if(...)#；JS 命令用 [[字段名]]，3.8 起不要手动加引号')
         self.page_condition_expr_edit = QLineEdit()
         self.page_condition_expr_edit.setPlaceholderText('页面条件判断时可填表达式；留空则按元素定位检测')
         self.detect_mode_combo = QComboBox()
@@ -1260,7 +1262,7 @@ class BrowserFlowWindow(QMainWindow):
             ACTION_RIGHT_CLICK_MENU, ACTION_DROPDOWN_TWO_STAGE, ACTION_WAIT_ELEMENT,
             ACTION_WAIT_ELEMENT_GONE, ACTION_SWITCH_IFRAME, ACTION_DRAG,
             ACTION_PAGE_CONDITION, ACTION_ADD_TABLE, ACTION_FILL_TABLE, ACTION_KEY_COMBO,
-            ACTION_KEY_PRESS, ACTION_SELECT_ALL, ACTION_CUSTOM_JS, ACTION_MOUSE_MULTI_CLICK,
+            ACTION_KEY_PRESS, ACTION_SELECT_ALL, ACTION_CUSTOM_JS, ACTION_CLEAR_NUMBERING, ACTION_MOUSE_MULTI_CLICK,
         )
         value_needed = action in (ACTION_INPUT, ACTION_MULTI_SELECT, ACTION_KEY_COMBO, ACTION_KEY_PRESS, ACTION_FILL_TABLE, ACTION_CUSTOM_JS)
         target_needed = action in (ACTION_DRAG, ACTION_RIGHT_CLICK_MENU, ACTION_DROPDOWN_TWO_STAGE)
@@ -1308,7 +1310,7 @@ class BrowserFlowWindow(QMainWindow):
         self.clear_before_input_check.setVisible(action in (ACTION_INPUT, ACTION_FILL_TABLE))
         self.wait_clickable_check.setVisible(action in (ACTION_WAIT_ELEMENT, ACTION_WAIT_ELEMENT_GONE))
         if action == ACTION_CUSTOM_JS:
-            self.value_template_edit.setPlaceholderText('JS 命令不会替换普通 {字段名}；需要字段值请使用 [[字段名]] 或 [[__RESULT__]]')
+            self.value_template_edit.setPlaceholderText('JS 命令不会替换普通 {字段名}；字段值写 [[字段名]] 或 [[__RESULT__]]，程序会自动加引号并转义')
             self.insert_result_btn.setText('插入[[__RESULT__]]')
         elif action in (ACTION_KEY_PRESS, ACTION_KEY_COMBO):
             self.value_template_edit.setPlaceholderText('填写按键名，例如 ENTER、TAB、ESC、DELETE、BACKSPACE、UP、DOWN、LEFT、RIGHT、F2；也兼容 CTRL+A')

@@ -26,7 +26,7 @@ from utils import resource_path
 from log import LogViewerDialog, log_change
 from gui_helpers import signal_blocked, wrap_text_flags as _wrap_text_flags
 
-__version__ = '3.7'
+__version__ = '3.8'
 # 主界面输入区的最小布局宽度。左侧分割区域小于此值时，行内控件按该宽度稳定布局，避免长文本反复重排导致卡顿。
 input_option_min_layout_width = 360
 # 打包命令：pyinstaller --clean PEditor.spec --distpath "D:\Microsoft Visual Studio\code"
@@ -4022,24 +4022,52 @@ class PEditor(QMainWindow):
         self._save_current_template()
         self._restore_input_values(preserved)
 
+    def resolve_copy_field_content(self, field_name, input_values=None):
+        """返回与复制按钮完全一致的字段渲染结果。
+
+        复制按钮和浏览器导入都调用这个函数，避免浏览器流程另走一套
+        简单占位符/公式解析时出现 dbjoin 未定义、字符串与数字混算等问题。
+        这里不触碰复制按钮的选中、布局和剪贴板逻辑，只复用稳定的取值过程。
+        """
+        if not self.current_template_name:
+            return ''
+        field_name = str(field_name or '').strip()
+        if not field_name:
+            return ''
+        if input_values is None:
+            input_values = self.collect_input_values()
+        if field_name in (self._last_final_fields or {}) and input_values == (self._last_input_values or {}):
+            return self._last_final_fields.get(field_name, '')
+
+        content = dict(self._get_current_process_content() or {})
+        content['selected_fields'] = [field_name]
+        _, _, final_fields = self.data_matcher.render(
+            self.current_template_name,
+            input_values,
+            process_content_override=content,
+        )
+        return final_fields.get(field_name, '')
+
+    def build_browser_rendered_fields(self, input_values=None):
+        """为浏览器导入准备字段缓存，内容与复制按钮点击结果保持一致。"""
+        rendered = {}
+        if not self.current_template_name:
+            return rendered
+        if input_values is None:
+            input_values = self.collect_input_values()
+        for field in self._get_all_process_field_names():
+            try:
+                rendered[field] = self.resolve_copy_field_content(field, input_values=input_values)
+            except Exception:
+                # 不因未使用字段的渲染失败阻断浏览器导入；真正使用该字段时仍可由日志/步骤错误提示定位。
+                continue
+        return rendered
+
     def copy_field_content(self, field_name):
         if not self.current_template_name:
             return
         try:
-            input_values = self.collect_input_values()
-            copy_text = ''
-            # 普通点击复制按钮时不再强制刷新预览和重排复制区；输入未变化时直接用缓存。
-            if field_name in (self._last_final_fields or {}) and input_values == (self._last_input_values or {}):
-                copy_text = self._last_final_fields.get(field_name, '')
-            else:
-                content = dict(self._get_current_process_content() or {})
-                content['selected_fields'] = [field_name]
-                _, _, final_fields = self.data_matcher.render(
-                    self.current_template_name,
-                    input_values,
-                    process_content_override=content,
-                )
-                copy_text = final_fields.get(field_name, '')
+            copy_text = self.resolve_copy_field_content(field_name)
             QApplication.clipboard().setText(str(copy_text or ''))
         except Exception as e:
             QMessageBox.critical(self, '错误', f'复制失败：{e}')
@@ -4122,6 +4150,7 @@ class PEditor(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, '提示', f'读取当前浏览器流程配置失败：{e}')
                 return
+        browser_rendered_fields = self.build_browser_rendered_fields(self._last_input_values)
         success, message = export.export_to_browser(
             self.template_db,
             self.current_template_name,
@@ -4129,6 +4158,7 @@ class PEditor(QMainWindow):
             self._last_final_fields,
             self._last_input_values,
             data_pool=self._last_data_pool,
+            rendered_fields=browser_rendered_fields,
             flow_override=flow_override,
             alert_handler=self._show_browser_alert,
         )
