@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QInputDialog,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -429,16 +430,19 @@ class BrowserFlowWindow(QMainWindow):
         self.loop_end_widget = QWidget()
         loop_end_layout = QHBoxLayout(self.loop_end_widget)
         loop_end_layout.setContentsMargins(0, 0, 0, 0)
-        loop_end_layout.addWidget(QLabel('循环标记:'))
+        self.loop_marker_label = QLabel('循环标记:')
+        loop_end_layout.addWidget(self.loop_marker_label)
         self.loop_marker_edit = QLineEdit('i')
         self.loop_marker_edit.setMaximumWidth(90)
         loop_end_layout.addWidget(self.loop_marker_edit)
-        loop_end_layout.addWidget(QLabel('起始:'))
+        self.loop_start_label = QLabel('起始:')
+        loop_end_layout.addWidget(self.loop_start_label)
         self.loop_start_spin = QSpinBox()
         self.loop_start_spin.setRange(1, 9999)
         self.loop_start_spin.setValue(1)
         loop_end_layout.addWidget(self.loop_start_spin)
-        loop_end_layout.addWidget(QLabel('结束:'))
+        self.loop_stop_label = QLabel('结束:')
+        loop_end_layout.addWidget(self.loop_stop_label)
         self.loop_stop_spin = QSpinBox()
         self.loop_stop_spin.setRange(1, 9999)
         self.loop_stop_spin.setValue(1)
@@ -461,20 +465,26 @@ class BrowserFlowWindow(QMainWindow):
         self.loop_content_cols_spin.setRange(1, 30)
         self.loop_content_cols_spin.setValue(1)
         loop_layout.addWidget(self.loop_content_cols_spin)
-        loop_layout.addWidget(QLabel('列标记:'))
-        self.loop_columns_edit = QLineEdit('内容')
-        self.loop_columns_edit.setPlaceholderText('逗号分隔，例如：内容,j,备注；列名可在模板/定位中用 [[列名]]')
-        loop_layout.addWidget(self.loop_columns_edit, 1)
-        self.loop_sync_table_btn = QPushButton('同步表格')
-        self.loop_sync_table_btn.clicked.connect(self.sync_loop_value_table_rows)
-        loop_layout.addWidget(self.loop_sync_table_btn)
+        loop_layout.addWidget(QLabel('行绑定:'))
+        self.loop_row_marker_edit = QLineEdit('i')
+        self.loop_row_marker_edit.setMaximumWidth(80)
+        self.loop_row_marker_edit.setPlaceholderText('如 i')
+        loop_layout.addWidget(self.loop_row_marker_edit)
+        loop_layout.addWidget(QLabel('列绑定:'))
+        self.loop_col_marker_edit = QLineEdit('j')
+        self.loop_col_marker_edit.setMaximumWidth(80)
+        self.loop_col_marker_edit.setPlaceholderText('如 j')
+        loop_layout.addWidget(self.loop_col_marker_edit)
+        loop_layout.addWidget(QLabel('双击表头修改行/列标签'))
+        loop_layout.addStretch()
 
-        self.loop_value_table = QTableWidget(0, 2)
-        self.loop_value_table.setHorizontalHeaderLabels(['序号', '内容'])
-        self.loop_value_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.loop_value_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.loop_value_table = QTableWidget(0, 0)
+        self.loop_value_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.loop_value_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.loop_value_table.horizontalHeader().sectionDoubleClicked.connect(self.edit_loop_column_label)
+        self.loop_value_table.verticalHeader().sectionDoubleClicked.connect(self.edit_loop_row_label)
         self.loop_value_table.setMinimumHeight(90)
-        self.loop_value_table.setMaximumHeight(220)
+        self.loop_value_table.setMaximumHeight(240)
 
         self.note_edit = QPlainTextEdit()
         self.newline_mode_combo = QComboBox()
@@ -995,7 +1005,10 @@ class BrowserFlowWindow(QMainWindow):
             'loop_enabled': False,
             'loop_content_rows': 1,
             'loop_content_cols': 1,
-            'loop_columns': ['内容'],
+            'loop_row_marker': 'i',
+            'loop_col_marker': 'j',
+            'loop_row_labels': ['1'],
+            'loop_col_labels': ['1'],
             'loop_values': [],
             'note': '',
         }
@@ -1051,9 +1064,10 @@ class BrowserFlowWindow(QMainWindow):
         self.loop_stop_spin.setValue(max(1, min(9999, int(step.get('loop_stop', 1) or 1))))
         self.loop_enabled_check.setChecked(bool(step.get('loop_enabled', False)))
         self.loop_content_rows_spin.setValue(max(1, min(9999, int(step.get('loop_content_rows', len(step.get('loop_values', []) or []) or 1) or 1))))
-        self.loop_content_cols_spin.setValue(max(1, min(30, int(step.get('loop_content_cols', len(step.get('loop_columns', []) or []) or 1) or 1))))
-        self.loop_columns_edit.setText(','.join(step.get('loop_columns', ['内容']) or ['内容']))
-        self.set_loop_table_values(step.get('loop_values', []) or [])
+        self.loop_content_cols_spin.setValue(max(1, min(30, int(step.get('loop_content_cols', len(step.get('loop_col_labels', []) or step.get('loop_columns', []) or []) or 1) or 1))))
+        self.loop_row_marker_edit.setText(str(step.get('loop_row_marker', 'i') or 'i'))
+        self.loop_col_marker_edit.setText(str(step.get('loop_col_marker', 'j') or 'j'))
+        self.set_loop_table_values(step.get('loop_values', []) or [], step.get('loop_row_labels'), step.get('loop_col_labels') or step.get('loop_columns'))
         self.note_edit.setPlainText(step.get('note', ''))
         self._loading_step = False
         self.update_action_visibility(self.action_combo.currentText())
@@ -1149,9 +1163,10 @@ class BrowserFlowWindow(QMainWindow):
         self.loop_stop_spin.setValue(max(1, min(9999, int(step.get('loop_stop', 1) or 1))))
         self.loop_enabled_check.setChecked(bool(step.get('loop_enabled', False)))
         self.loop_content_rows_spin.setValue(max(1, min(9999, int(step.get('loop_content_rows', len(step.get('loop_values', []) or []) or 1) or 1))))
-        self.loop_content_cols_spin.setValue(max(1, min(30, int(step.get('loop_content_cols', len(step.get('loop_columns', []) or []) or 1) or 1))))
-        self.loop_columns_edit.setText(','.join(step.get('loop_columns', ['内容']) or ['内容']))
-        self.set_loop_table_values(step.get('loop_values', []) or [])
+        self.loop_content_cols_spin.setValue(max(1, min(30, int(step.get('loop_content_cols', len(step.get('loop_col_labels', []) or step.get('loop_columns', []) or []) or 1) or 1))))
+        self.loop_row_marker_edit.setText(str(step.get('loop_row_marker', 'i') or 'i'))
+        self.loop_col_marker_edit.setText(str(step.get('loop_col_marker', 'j') or 'j'))
+        self.set_loop_table_values(step.get('loop_values', []) or [], step.get('loop_row_labels'), step.get('loop_col_labels') or step.get('loop_columns'))
         self.note_edit.setPlainText(step.get('note', ''))
         self._loading_step = False
         self.update_action_visibility(self.action_combo.currentText())
@@ -1198,7 +1213,10 @@ class BrowserFlowWindow(QMainWindow):
             loop_enabled=self.loop_enabled_check.isChecked(),
             loop_content_rows=self.loop_content_rows_spin.value(),
             loop_content_cols=self.loop_content_cols_spin.value(),
-            loop_columns=self.get_loop_columns(),
+            loop_row_marker=self.loop_row_marker_edit.text().strip() or 'i',
+            loop_col_marker=self.loop_col_marker_edit.text().strip() or 'j',
+            loop_row_labels=self.get_loop_row_labels(),
+            loop_col_labels=self.get_loop_col_labels(),
             loop_values=self.get_loop_table_values(),
             note=self.note_edit.toPlainText(),
         )
@@ -1280,6 +1298,10 @@ class BrowserFlowWindow(QMainWindow):
         self._set_form_row_visible(self.keyboard_action_widget, keyboard_needed)
         self._set_form_row_visible(self.jump_step_widget, jump_needed)
         self._set_form_row_visible(self.loop_end_widget, loop_end_needed)
+        self.loop_start_label.setVisible(action == ACTION_LOOP_START)
+        self.loop_start_spin.setVisible(action == ACTION_LOOP_START)
+        self.loop_stop_label.setVisible(action == ACTION_LOOP_END)
+        self.loop_stop_spin.setVisible(action == ACTION_LOOP_END)
         self._set_form_row_visible(self.loop_widget, value_loop_supported)
         self._set_form_row_visible(self.loop_value_table, use_loop_table)
         self.use_js_click_check.setVisible(action == ACTION_CLICK)
@@ -1318,62 +1340,125 @@ class BrowserFlowWindow(QMainWindow):
             self.insert_template_text('{__RESULT__}')
 
 
-    def get_loop_columns(self):
-        text = str(self.loop_columns_edit.text() or '').strip()
-        columns = [item.strip() for item in text.replace('，', ',').split(',') if item.strip()]
-        count = max(1, min(30, int(self.loop_content_cols_spin.value() or 1)))
-        if not columns:
-            columns = ['内容']
-        while len(columns) < count:
-            columns.append(f'列{len(columns) + 1}')
-        return columns[:count]
+    def _default_loop_row_labels(self, count=None):
+        count = int(count if count is not None else self.loop_content_rows_spin.value() or 1)
+        return [str(i + 1) for i in range(max(1, count))]
+
+    def _default_loop_col_labels(self, count=None):
+        count = int(count if count is not None else self.loop_content_cols_spin.value() or 1)
+        return [str(i + 1) for i in range(max(1, count))]
+
+    def get_loop_row_labels(self):
+        labels = []
+        header = self.loop_value_table.verticalHeader()
+        for row in range(self.loop_value_table.rowCount()):
+            item = self.loop_value_table.verticalHeaderItem(row)
+            text = item.text().strip() if item is not None else ''
+            labels.append(text or str(row + 1))
+        return labels or self._default_loop_row_labels()
+
+    def get_loop_col_labels(self):
+        labels = []
+        for col in range(self.loop_value_table.columnCount()):
+            item = self.loop_value_table.horizontalHeaderItem(col)
+            text = item.text().strip() if item is not None else ''
+            labels.append(text or str(col + 1))
+        return labels or self._default_loop_col_labels()
 
     def get_loop_table_values(self):
-        columns = self.get_loop_columns()
         values = []
         for row in range(self.loop_value_table.rowCount()):
-            row_data = {}
-            for col_index, name in enumerate(columns, start=1):
-                item = self.loop_value_table.item(row, col_index)
-                row_data[name] = item.text() if item is not None else ''
-            values.append(row_data)
+            row_values = []
+            for col in range(self.loop_value_table.columnCount()):
+                item = self.loop_value_table.item(row, col)
+                row_values.append(item.text() if item is not None else '')
+            values.append(row_values)
         return values
 
-    def set_loop_table_values(self, values):
+    @staticmethod
+    def _normalize_2d_loop_values(values, rows, cols, col_labels=None):
+        result = [['' for _ in range(cols)] for _ in range(rows)]
         values = list(values or [])
+        col_labels = [str(x).strip() for x in (col_labels or [])]
+        for row_index in range(min(rows, len(values))):
+            src = values[row_index]
+            if isinstance(src, dict):
+                for col_index in range(cols):
+                    key = col_labels[col_index] if col_index < len(col_labels) else str(col_index + 1)
+                    if key in src:
+                        result[row_index][col_index] = '' if src.get(key) is None else str(src.get(key))
+                    elif col_index == 0:
+                        for alt in ('内容', '输入内容', '参数内容', '__VALUE__', 'value', 'VALUE'):
+                            if alt in src:
+                                result[row_index][col_index] = '' if src.get(alt) is None else str(src.get(alt))
+                                break
+            elif isinstance(src, (list, tuple)):
+                for col_index in range(min(cols, len(src))):
+                    result[row_index][col_index] = '' if src[col_index] is None else str(src[col_index])
+            else:
+                if cols:
+                    result[row_index][0] = '' if src is None else str(src)
+        return result
+
+    def set_loop_table_values(self, values, row_labels=None, col_labels=None):
+        rows = max(1, min(9999, int(self.loop_content_rows_spin.value() or 1)))
+        cols = max(1, min(30, int(self.loop_content_cols_spin.value() or 1)))
+        row_labels = [str(x).strip() for x in (row_labels or []) if str(x).strip()]
+        col_labels = [str(x).strip() for x in (col_labels or []) if str(x).strip()]
+        while len(row_labels) < rows:
+            row_labels.append(str(len(row_labels) + 1))
+        while len(col_labels) < cols:
+            col_labels.append(str(len(col_labels) + 1))
+        row_labels = row_labels[:rows]
+        col_labels = col_labels[:cols]
+        values_2d = self._normalize_2d_loop_values(values, rows, cols, col_labels)
         self.loop_value_table.blockSignals(True)
         try:
-            columns = self.get_loop_columns()
-            count = max(1, min(9999, int(self.loop_content_rows_spin.value() or 1))) if self.loop_enabled_check.isChecked() else max(len(values), 0)
-            self.loop_value_table.setColumnCount(len(columns) + 1)
-            self.loop_value_table.setHorizontalHeaderLabels(['序号'] + columns)
-            self.loop_value_table.setRowCount(count)
-            self.loop_value_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-            for col in range(1, len(columns) + 1):
+            self.loop_value_table.setRowCount(rows)
+            self.loop_value_table.setColumnCount(cols)
+            self.loop_value_table.setVerticalHeaderLabels(row_labels)
+            self.loop_value_table.setHorizontalHeaderLabels(col_labels)
+            for col in range(cols):
                 self.loop_value_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.Stretch)
-            for row in range(count):
-                idx_item = QTableWidgetItem(str(row + 1))
-                idx_item.setFlags(idx_item.flags() & ~Qt.ItemIsEditable)
-                self.loop_value_table.setItem(row, 0, idx_item)
-                src = values[row] if row < len(values) else {}
-                if not isinstance(src, dict):
-                    src = {columns[0]: str(src)}
-                for col_index, name in enumerate(columns, start=1):
-                    self.loop_value_table.setItem(row, col_index, QTableWidgetItem(str(src.get(name, ''))))
+            for row in range(rows):
+                for col in range(cols):
+                    self.loop_value_table.setItem(row, col, QTableWidgetItem(values_2d[row][col]))
         finally:
             self.loop_value_table.blockSignals(False)
 
     def sync_loop_value_table_rows(self):
         old_values = self.get_loop_table_values()
-        self.set_loop_table_values(old_values)
+        old_row_labels = self.get_loop_row_labels()
+        old_col_labels = self.get_loop_col_labels()
+        self.set_loop_table_values(old_values, old_row_labels, old_col_labels)
         self._save_current_editor_to_flow(auto=True, persist=True)
+
+    def edit_loop_row_label(self, row):
+        if row < 0:
+            return
+        current = self.get_loop_row_labels()[row] if row < len(self.get_loop_row_labels()) else str(row + 1)
+        text, ok = QInputDialog.getText(self, '修改行标签', '行标签值：', text=current)
+        if ok:
+            item = QTableWidgetItem(str(text).strip() or str(row + 1))
+            self.loop_value_table.setVerticalHeaderItem(row, item)
+            self._save_current_editor_to_flow(auto=True, persist=True)
+
+    def edit_loop_column_label(self, col):
+        if col < 0:
+            return
+        current = self.get_loop_col_labels()[col] if col < len(self.get_loop_col_labels()) else str(col + 1)
+        text, ok = QInputDialog.getText(self, '修改列标签', '列标签值：', text=current)
+        if ok:
+            item = QTableWidgetItem(str(text).strip() or str(col + 1))
+            self.loop_value_table.setHorizontalHeaderItem(col, item)
+            self._save_current_editor_to_flow(auto=True, persist=True)
 
     def _connect_auto_save_signals(self):
         widgets_text = [
             self.step_name_edit, self.step_condition_edit, self.target_locator_value_edit,
             self.page_condition_expr_edit, self.window_match_value_edit,
         ]
-        widgets_text.append(self.loop_marker_edit)
+        widgets_text.extend([self.loop_marker_edit, self.loop_row_marker_edit, self.loop_col_marker_edit])
         for widget in widgets_text:
             widget.textChanged.connect(lambda *args: self._save_current_editor_to_flow(auto=True, persist=True))
         self.locator_value_edit.textChanged.connect(lambda: self._save_current_editor_to_flow(auto=True, persist=True))
@@ -1400,7 +1485,6 @@ class BrowserFlowWindow(QMainWindow):
         self.loop_enabled_check.stateChanged.connect(lambda *args: (self.update_action_visibility(self.action_combo.currentText()), self.sync_loop_value_table_rows()))
         self.loop_content_rows_spin.valueChanged.connect(lambda *args: self.sync_loop_value_table_rows())
         self.loop_content_cols_spin.valueChanged.connect(lambda *args: self.sync_loop_value_table_rows())
-        self.loop_columns_edit.textChanged.connect(lambda *args: self.sync_loop_value_table_rows())
         self.loop_value_table.itemChanged.connect(lambda *args: self._save_current_editor_to_flow(auto=True, persist=True))
         for edit in (self.chromedriver_edit, self.chrome_binary_edit, self.debug_port_edit, self.start_url_edit, self.implicit_wait_edit):
             edit.textChanged.connect(lambda *args: self._save_flow_config_silent())

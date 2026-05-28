@@ -1729,26 +1729,56 @@ class BrowserEngine:
         return stack[-1] if stack else None
 
     @staticmethod
-    def _loop_row_as_dict(row_value, columns=None):
-        columns = [str(c).strip() for c in (columns or []) if str(c).strip()]
-        if isinstance(row_value, dict):
-            return {str(k).strip(): '' if v is None else str(v) for k, v in row_value.items() if str(k).strip()}
-        if columns:
-            return {columns[0]: '' if row_value is None else str(row_value)}
-        return {'内容': '' if row_value is None else str(row_value)}
+    def _loop_value_from_grid(values, row_labels, col_labels, loop_vars, row_marker='i', col_marker='j'):
+        """按循环变量从二维循环内容表读取单元格。"""
+        values = list(values or [])
+        row_labels = [str(x).strip() for x in (row_labels or [])]
+        col_labels = [str(x).strip() for x in (col_labels or [])]
+        row_marker = BrowserEngine._normalize_loop_marker(row_marker or 'i')
+        col_marker = BrowserEngine._normalize_loop_marker(col_marker or 'j')
 
-    @staticmethod
-    def _row_value_template(row_vars: dict, columns=None) -> str:
-        if not row_vars:
+        row_key = str(loop_vars.get(row_marker, '')).strip() if row_marker else ''
+        col_key = str(loop_vars.get(col_marker, '')).strip() if col_marker else ''
+
+        row_index = 0
+        if row_key and row_key in row_labels:
+            row_index = row_labels.index(row_key)
+        elif row_key:
+            try:
+                numeric_row = int(float(row_key))
+                if 1 <= numeric_row <= len(values):
+                    row_index = numeric_row - 1
+            except Exception:
+                row_index = 0
+
+        col_index = 0
+        if col_key and col_key in col_labels:
+            col_index = col_labels.index(col_key)
+        elif col_key:
+            try:
+                numeric_col = int(float(col_key))
+                max_cols = len(col_labels) if col_labels else 0
+                if max_cols and 1 <= numeric_col <= max_cols:
+                    col_index = numeric_col - 1
+            except Exception:
+                col_index = 0
+
+        if row_index < 0 or row_index >= len(values):
             return ''
-        for key in ('内容', '输入内容', '参数内容', '__VALUE__', 'value', 'VALUE'):
-            if key in row_vars:
-                return str(row_vars.get(key, ''))
-        columns = [str(c).strip() for c in (columns or []) if str(c).strip()]
-        if columns:
-            return str(row_vars.get(columns[0], ''))
-        first_key = next(iter(row_vars.keys()), '')
-        return str(row_vars.get(first_key, '')) if first_key else ''
+        row_value = values[row_index]
+        if isinstance(row_value, dict):
+            key = col_labels[col_index] if col_index < len(col_labels) else str(col_index + 1)
+            if key in row_value:
+                return '' if row_value.get(key) is None else str(row_value.get(key))
+            for alt in ('内容', '输入内容', '参数内容', '__VALUE__', 'value', 'VALUE'):
+                if alt in row_value:
+                    return '' if row_value.get(alt) is None else str(row_value.get(alt))
+            return ''
+        if isinstance(row_value, (list, tuple)):
+            if 0 <= col_index < len(row_value):
+                return '' if row_value[col_index] is None else str(row_value[col_index])
+            return ''
+        return '' if row_value is None else str(row_value)
 
     def _prepare_step_for_loop(self, step: dict, payload: dict, context: dict):
         """按当前循环块上下文准备步骤副本。
@@ -1772,12 +1802,20 @@ class BrowserEngine:
         row_vars = {}
         if loop_step.get('loop_enabled'):
             values = list(loop_step.get('loop_values', []) or [])
-            columns = loop_step.get('loop_columns', []) or []
-            if offset < len(values):
-                row_vars = self._loop_row_as_dict(values[offset], columns)
-            loop_step['value_template'] = self._row_value_template(row_vars, columns)
+            row_labels = loop_step.get('loop_row_labels', []) or []
+            col_labels = loop_step.get('loop_col_labels', []) or loop_step.get('loop_columns', []) or []
+            # 3.7 起循环内容表按“行标签 + 列标签”读取单元格：
+            # 例如行绑定 i、列绑定 j，当前 i=3、j=2 时读取行标签为 3、列标签为 2 的单元格。
+            cell_value = self._loop_value_from_grid(
+                values,
+                row_labels,
+                col_labels,
+                loop_vars,
+                loop_step.get('loop_row_marker', 'i'),
+                loop_step.get('loop_col_marker', 'j'),
+            )
+            loop_step['value_template'] = cell_value
         merged_vars = dict(loop_vars)
-        merged_vars.update(row_vars)
         for key in ('locator_value', 'target_locator_value', 'window_match_value', 'page_condition_expr', 'condition_expr', 'value_template'):
             if key in loop_step:
                 loop_step[key] = self._replace_loop_vars(loop_step.get(key, ''), merged_vars)
