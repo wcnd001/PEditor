@@ -906,6 +906,29 @@ class BrowserEngine:
         actions.perform()
         return True
 
+    @staticmethod
+    def _float_step_value(step: dict, key: str, default: float, minimum: float = 0.0, maximum: float = 9999.0) -> float:
+        try:
+            value = float(step.get(key, default))
+        except Exception:
+            value = float(default)
+        return max(float(minimum), min(float(maximum), value))
+
+    def _element_view_point(self, element, offset_x=None, offset_y=None):
+        try:
+            return self.driver.execute_script(
+                "var el=arguments[0], ox=arguments[1], oy=arguments[2];"
+                "var r=el.getBoundingClientRect();"
+                "var x=(ox===null || ox===undefined) ? (r.left+r.width/2) : (r.left+ox);"
+                "var y=(oy===null || oy===undefined) ? (r.top+r.height/2) : (r.top+oy);"
+                "return {x:x, y:y};",
+                element,
+                offset_x,
+                offset_y,
+            ) or {}
+        except Exception:
+            return {}
+
     def _drag_drop_element(self, step: dict, timeout: float = 10):
         action_timeout = self._quick_action_timeout(timeout)
         source = self._retry_find_element(step.get('locator_type', ''), step.get('locator_value', ''), timeout=action_timeout, clickable=True, attempts=1)
@@ -923,10 +946,70 @@ class BrowserEngine:
             offset_y = int(float(step.get('drag_offset_y', 0) or 0))
         else:
             offset_x, offset_y = width // 2, height // 2
-        actions = ActionChains(self.driver)
-        actions.move_to_element(source).click_and_hold(source).pause(0.15)
-        actions.move_to_element_with_offset(target, offset_x, offset_y).pause(0.15).release().perform()
-        return True
+
+        steps = max(1, min(200, int(float(step.get('drag_steps', 24) or 24))))
+        move_seconds = self._float_step_value(step, 'drag_move_seconds', 0.8, minimum=0.1, maximum=30.0)
+        hold_seconds = self._float_step_value(step, 'drag_hold_seconds', 0.2, minimum=0.0, maximum=30.0)
+        hover_seconds = self._float_step_value(step, 'drag_hover_seconds', 0.4, minimum=0.0, maximum=30.0)
+        wait_target_ready = bool(step.get('drag_wait_target_ready', True))
+
+        source_point = self._element_view_point(source)
+        target_point = self._element_view_point(target, offset_x, offset_y)
+        if not source_point or not target_point:
+            actions = ActionChains(self.driver)
+            actions.move_to_element(source).click_and_hold(source).pause(hold_seconds)
+            actions.move_to_element_with_offset(target, offset_x, offset_y).pause(hover_seconds).release().perform()
+            return True
+
+        total_dx = float(target_point.get('x', 0)) - float(source_point.get('x', 0))
+        total_dy = float(target_point.get('y', 0)) - float(source_point.get('y', 0))
+        pause_seconds = move_seconds / float(steps)
+        moved_x = 0
+        moved_y = 0
+        try:
+            actions = ActionChains(self.driver)
+            actions.move_to_element(source).click_and_hold(source).pause(hold_seconds)
+            for index in range(1, steps + 1):
+                next_x = int(round(total_dx * index / steps))
+                next_y = int(round(total_dy * index / steps))
+                dx = next_x - moved_x
+                dy = next_y - moved_y
+                moved_x, moved_y = next_x, next_y
+                if dx or dy:
+                    actions.move_by_offset(dx, dy)
+                if pause_seconds > 0:
+                    actions.pause(pause_seconds)
+            actions.perform()
+
+            if wait_target_ready:
+                by = self._locator_to_by(step.get('target_locator_type', ''))
+                target_locator = step.get('target_locator_value', '')
+                def target_ready(driver):
+                    try:
+                        items = driver.find_elements(by, target_locator)
+                    except Exception:
+                        return False
+                    for item in items:
+                        try:
+                            if item.is_displayed() and item.is_enabled():
+                                return item
+                        except Exception:
+                            continue
+                    return False
+                fresh_target = WebDriverWait(self.driver, max(0.1, float(timeout))).until(target_ready)
+                try:
+                    ActionChains(self.driver).move_to_element_with_offset(fresh_target, offset_x, offset_y).pause(hover_seconds).release().perform()
+                except Exception:
+                    ActionChains(self.driver).pause(hover_seconds).release().perform()
+            else:
+                ActionChains(self.driver).pause(hover_seconds).release().perform()
+            return True
+        except Exception:
+            try:
+                ActionChains(self.driver).release().perform()
+            except Exception:
+                pass
+            raise
 
     def _add_table(self, locator_type: str, locator_value: str, timeout: float = 10):
         return self._click_element(locator_type, locator_value, timeout=timeout)
@@ -1574,6 +1657,8 @@ class BrowserEngine:
         }
         if key in special_map:
             return special_map.get(key, '')
+        if key in (payload or {}):
+            return (payload or {}).get(key)
         # 浏览器步骤字段取值优先使用主界面复制按钮同源渲染结果。
         # 原先 data_pool 排在 final_fields 前面，容易拿到未渲染公式文本，导致
         # 浏览器导入出现 dbjoin 未定义、str 与 float 混算等与复制按钮不一致的问题。
@@ -1713,6 +1798,56 @@ class BrowserEngine:
             return
         element.send_keys(value)
 
+
+    @staticmethod
+    def _normalize_flow_variable_name(name: str) -> str:
+        text = str(name or '').strip()
+        if text.startswith('[[') and text.endswith(']]'):
+            text = text[2:-2].strip()
+        if text.startswith('{') and text.endswith('}'):
+            text = text[1:-1].strip()
+        return text
+
+    @classmethod
+    def _store_payload_variable(cls, payload: dict, name: str, value):
+        key = cls._normalize_flow_variable_name(name)
+        if not key:
+            raise BrowserEngineError('绑定变量名不能为空')
+        payload[key] = value
+        data_pool = dict(payload.get('data_pool', {}) or {})
+        data_pool[key] = value
+        payload['data_pool'] = data_pool
+        return key
+
+    def _resolve_loop_bound(self, value, payload: dict, context: dict, default: int = 1, label: str = '循环值') -> int:
+        raw = str(value if value is not None else '').strip()
+        if not raw:
+            raw = str(default)
+        loop_vars = self._loop_variables_from_context(context)
+        raw = self._replace_loop_vars(raw, loop_vars)
+        candidates = [raw]
+        var_name = self._normalize_flow_variable_name(raw)
+        looked = self._payload_lookup(payload or {}, var_name)
+        if looked not in (None, ''):
+            candidates.append(str(looked))
+        try:
+            rendered = self.render_value_template(raw, payload or {})
+            if rendered not in candidates:
+                candidates.append(rendered)
+        except Exception:
+            pass
+        for item in candidates:
+            try:
+                number = int(float(str(item).strip()))
+                return max(1, min(9999, number))
+            except Exception:
+                continue
+        raise BrowserEngineError(f'{label}无法解析为数字：{raw}')
+
+    def _count_elements(self, locator_type: str, locator_value: str) -> int:
+        if not str(locator_value or '').strip():
+            raise BrowserEngineError('统计元素数量未配置定位值')
+        return len(self._find_elements(locator_type, locator_value))
 
     @staticmethod
     def _normalize_loop_marker(marker: str) -> str:
@@ -1863,7 +1998,7 @@ class BrowserEngine:
         label = ','.join(f'{k}={v}' for k, v in merged_vars.items() if not str(k).startswith('__'))
         return loop_step, self._loop_payload(payload, merged_vars), label
 
-    def execute_flow(self, flow_config: dict, payload: dict, logger=None, alert_handler=None):
+    def execute_flow(self, flow_config: dict, payload: dict, logger=None, alert_handler=None, start_step_no: int = 1, end_step_no: int = 0):
         browser_cfg = (flow_config or {}).get('browser', {}) or {}
         self.ensure_connected(browser_cfg, logger=logger)
 
@@ -1890,18 +2025,26 @@ class BrowserEngine:
             'loop_stack': [],
         }
 
-        idx = 0
-        while idx < len(steps):
+        start_step_no = self._coerce_branch_step(start_step_no) or 1
+        end_step_no = self._coerce_branch_step(end_step_no)
+        start_index = self._resolve_step_index(start_step_no, len(steps))
+        end_index = self._resolve_step_index(end_step_no, len(steps)) if end_step_no else None
+        idx = start_index if start_index is not None else 0
+        if end_index is not None and idx > end_index:
+            raise BrowserEngineError(f'测试导入范围无效：开始步骤 {idx + 1} 大于结束步骤 {end_index + 1}')
+        if idx > 0 and end_index is not None:
+            self._log(logger, f'测试导入执行范围：第 {idx + 1} 步到第 {end_index + 1} 步。')
+        elif idx > 0:
+            self._log(logger, f'测试导入从第 {idx + 1} 步开始执行。')
+        elif end_index is not None:
+            self._log(logger, f'测试导入执行到第 {end_index + 1} 步后停止。')
+        while idx < len(steps) and (end_index is None or idx <= end_index):
             raw_step = steps[idx] or {}
             raw_action = (raw_step.get('action') or '').strip()
 
             if raw_action == '循环开始':
                 marker = self._normalize_loop_marker(raw_step.get('loop_marker', 'i'))
-                try:
-                    start_value = int(raw_step.get('loop_start', 1) or 1)
-                except Exception:
-                    start_value = 1
-                start_value = max(1, min(9999, start_value))
+                start_value = self._resolve_loop_bound(raw_step.get('loop_start', 1), payload, context, default=1, label='循环起始值')
                 context.setdefault('loop_stack', []).append({'start_idx': idx, 'marker': marker, 'start': start_value, 'current': start_value})
                 name = (raw_step.get('name') or f'步骤{idx + 1}').strip()
                 self._log(logger, f'[{idx + 1}] {name} - 循环开始：{marker} = {start_value}')
@@ -1976,6 +2119,12 @@ class BrowserEngine:
                 self._mouse_multi_click(step, timeout=timeout)
                 context['last_window_count'] = len(self.driver.window_handles)
 
+            elif action == '统计元素数量':
+                count = self._count_elements(step.get('locator_type', ''), step.get('locator_value', ''))
+                var_name = self._store_payload_variable(payload, step.get('count_result_name', 'n'), count)
+                self._store_payload_variable(step_payload, var_name, count)
+                self._log(logger, f'统计元素数量：{var_name} = {count}')
+
             elif action == '拖拽元素':
                 self._drag_drop_element(step, timeout=timeout)
                 context['last_window_count'] = len(self.driver.window_handles)
@@ -2032,11 +2181,7 @@ class BrowserEngine:
                 if loop_pos is None:
                     raise BrowserEngineError(f'遇到“循环结束”，但没有找到对应循环标记：{end_marker}')
                 loop_ctx = stack[loop_pos]
-                try:
-                    stop = int(step.get('loop_stop', 1) or 1)
-                except Exception:
-                    stop = 1
-                stop = max(1, min(9999, stop))
+                stop = self._resolve_loop_bound(step.get('loop_stop', 1), step_payload, context, default=1, label='循环结束值')
                 current = int(loop_ctx.get('current', loop_ctx.get('start', 1)) or 1)
                 if current < stop:
                     loop_ctx['current'] = current + 1

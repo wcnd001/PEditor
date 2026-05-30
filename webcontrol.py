@@ -87,6 +87,7 @@ ACTION_FILL_TABLE = '自动填单元格'
 ACTION_CUSTOM_JS = '执行JavaScript命令'
 ACTION_CLEAR_NUMBERING = '去除自动编号'
 ACTION_MOUSE_MULTI_CLICK = '鼠标连击'
+ACTION_COUNT_ELEMENTS = '统计元素数量'
 ACTION_LOOP_START = '循环开始'
 ACTION_LOOP_END = '循环结束'
 ACTION_JUMP_STEP = '跳转至步骤'
@@ -116,6 +117,7 @@ STEP_ACTIONS = [
     ACTION_CUSTOM_JS,
     ACTION_CLEAR_NUMBERING,
     ACTION_MOUSE_MULTI_CLICK,
+    ACTION_COUNT_ELEMENTS,
     ACTION_LOOP_START,
     ACTION_LOOP_END,
     ACTION_JUMP_STEP,
@@ -245,6 +247,17 @@ class BrowserFlowWindow(QMainWindow):
         self.test_btn = QPushButton('测试导入')
         self.test_btn.clicked.connect(self.test_import)
         btn_row.addWidget(self.test_btn)
+        btn_row.addWidget(QLabel('执行范围: 第'))
+        self.test_start_step_edit = QLineEdit()
+        self.test_start_step_edit.setPlaceholderText('开始')
+        self.test_start_step_edit.setMaximumWidth(58)
+        btn_row.addWidget(self.test_start_step_edit)
+        btn_row.addWidget(QLabel('步 到第'))
+        self.test_end_step_edit = QLineEdit()
+        self.test_end_step_edit.setPlaceholderText('结束')
+        self.test_end_step_edit.setMaximumWidth(58)
+        btn_row.addWidget(self.test_end_step_edit)
+        btn_row.addWidget(QLabel('步'))
         btn_row.addStretch(1)
         browser_layout.addLayout(btn_row)
 
@@ -368,6 +381,49 @@ class BrowserFlowWindow(QMainWindow):
         drag_offset_layout.addWidget(QLabel('Y:'))
         drag_offset_layout.addWidget(self.drag_offset_y_spin)
         drag_offset_layout.addStretch()
+
+        self.drag_timing_widget = QWidget()
+        drag_timing_layout = QHBoxLayout(self.drag_timing_widget)
+        drag_timing_layout.setContentsMargins(0, 0, 0, 0)
+        drag_timing_layout.addWidget(QLabel('步数:'))
+        self.drag_steps_spin = QSpinBox()
+        self.drag_steps_spin.setRange(1, 200)
+        self.drag_steps_spin.setValue(24)
+        drag_timing_layout.addWidget(self.drag_steps_spin)
+        drag_timing_layout.addWidget(QLabel('移动耗时(秒):'))
+        self.drag_move_seconds_spin = QDoubleSpinBox()
+        self.drag_move_seconds_spin.setRange(0.1, 30)
+        self.drag_move_seconds_spin.setDecimals(1)
+        self.drag_move_seconds_spin.setValue(0.8)
+        drag_timing_layout.addWidget(self.drag_move_seconds_spin)
+        drag_timing_layout.addWidget(QLabel('按住等待:'))
+        self.drag_hold_seconds_spin = QDoubleSpinBox()
+        self.drag_hold_seconds_spin.setRange(0, 30)
+        self.drag_hold_seconds_spin.setDecimals(1)
+        self.drag_hold_seconds_spin.setValue(0.2)
+        drag_timing_layout.addWidget(self.drag_hold_seconds_spin)
+        drag_timing_layout.addWidget(QLabel('悬停等待:'))
+        self.drag_hover_seconds_spin = QDoubleSpinBox()
+        self.drag_hover_seconds_spin.setRange(0, 30)
+        self.drag_hover_seconds_spin.setDecimals(1)
+        self.drag_hover_seconds_spin.setValue(0.4)
+        drag_timing_layout.addWidget(self.drag_hover_seconds_spin)
+        self.drag_wait_target_check = QCheckBox('释放前重新识别目标')
+        self.drag_wait_target_check.setChecked(True)
+        drag_timing_layout.addWidget(self.drag_wait_target_check)
+        drag_timing_layout.addStretch()
+
+        self.count_result_widget = QWidget()
+        count_result_layout = QHBoxLayout(self.count_result_widget)
+        count_result_layout.setContentsMargins(0, 0, 0, 0)
+        count_result_layout.addWidget(QLabel('绑定变量:'))
+        self.count_result_name_edit = QLineEdit('n')
+        self.count_result_name_edit.setMaximumWidth(90)
+        self.count_result_name_edit.setPlaceholderText('如 n')
+        count_result_layout.addWidget(self.count_result_name_edit)
+        count_result_layout.addWidget(QLabel('后续循环起始/结束可填该变量'))
+        count_result_layout.addStretch()
+
         self.value_template_edit = QPlainTextEdit()
         self.value_template_edit.setPlaceholderText('普通动作可使用 {字段名}、{__RESULT__}、#if(...)#；JS 命令用 [[字段名]]，3.8 起不要手动加引号')
         self.page_condition_expr_edit = QLineEdit()
@@ -439,16 +495,16 @@ class BrowserFlowWindow(QMainWindow):
         loop_end_layout.addWidget(self.loop_marker_edit)
         self.loop_start_label = QLabel('起始:')
         loop_end_layout.addWidget(self.loop_start_label)
-        self.loop_start_spin = QSpinBox()
-        self.loop_start_spin.setRange(1, 9999)
-        self.loop_start_spin.setValue(1)
-        loop_end_layout.addWidget(self.loop_start_spin)
+        self.loop_start_edit = QLineEdit('1')
+        self.loop_start_edit.setMaximumWidth(90)
+        self.loop_start_edit.setPlaceholderText('数字或变量')
+        loop_end_layout.addWidget(self.loop_start_edit)
         self.loop_stop_label = QLabel('结束:')
         loop_end_layout.addWidget(self.loop_stop_label)
-        self.loop_stop_spin = QSpinBox()
-        self.loop_stop_spin.setRange(1, 9999)
-        self.loop_stop_spin.setValue(1)
-        loop_end_layout.addWidget(self.loop_stop_spin)
+        self.loop_stop_edit = QLineEdit('1')
+        self.loop_stop_edit.setMaximumWidth(90)
+        self.loop_stop_edit.setPlaceholderText('数字或变量')
+        loop_end_layout.addWidget(self.loop_stop_edit)
         loop_end_layout.addWidget(QLabel('循环块内定位值可写 [[i]]、[[j]]'))
         loop_end_layout.addStretch()
 
@@ -551,6 +607,8 @@ class BrowserFlowWindow(QMainWindow):
         form.addRow('目标定位值:', self.target_locator_value_edit)
         form.addRow('释放位置:', self.drop_position_combo)
         form.addRow('拖拽偏移:', self.drag_offset_widget)
+        form.addRow('拖拽速度/等待:', self.drag_timing_widget)
+        form.addRow('统计结果:', self.count_result_widget)
         form.addRow('输入/参数模板:', self.value_template_edit)
         form.addRow('字段插入:', self.field_insert_widget)
         form.addRow('页面判断表达式:', self.page_condition_expr_edit)
@@ -977,6 +1035,12 @@ class BrowserFlowWindow(QMainWindow):
             'drop_position': '中间',
             'drag_offset_x': 0,
             'drag_offset_y': 0,
+            'drag_steps': 24,
+            'drag_move_seconds': 0.8,
+            'drag_hold_seconds': 0.2,
+            'drag_hover_seconds': 0.4,
+            'drag_wait_target_ready': True,
+            'count_result_name': 'n',
             'value_template': '',
             'page_condition_expr': '',
             'detect_mode': '等待判断',
@@ -1037,6 +1101,12 @@ class BrowserFlowWindow(QMainWindow):
         self.drop_position_combo.setCurrentText(step.get('drop_position', '中间'))
         self.drag_offset_x_spin.setValue(int(step.get('drag_offset_x', 0) or 0))
         self.drag_offset_y_spin.setValue(int(step.get('drag_offset_y', 0) or 0))
+        self.drag_steps_spin.setValue(max(1, min(200, int(step.get('drag_steps', 24) or 24))))
+        self.drag_move_seconds_spin.setValue(float(step.get('drag_move_seconds', 0.8) or 0.8))
+        self.drag_hold_seconds_spin.setValue(float(step.get('drag_hold_seconds', 0.2) or 0.0))
+        self.drag_hover_seconds_spin.setValue(float(step.get('drag_hover_seconds', 0.4) or 0.0))
+        self.drag_wait_target_check.setChecked(bool(step.get('drag_wait_target_ready', True)))
+        self.count_result_name_edit.setText(str(step.get('count_result_name', 'n') or 'n'))
         self.value_template_edit.setPlainText(step.get('value_template', ''))
         self.page_condition_expr_edit.setText(step.get('page_condition_expr', ''))
         self.detect_mode_combo.setCurrentText(step.get('detect_mode', '等待判断'))
@@ -1062,8 +1132,8 @@ class BrowserFlowWindow(QMainWindow):
         self.keyboard_hold_seconds_spin.setValue(float(step.get('keyboard_hold_seconds', 1.0) or 1.0))
         self.jump_step_spin.setValue(max(1, int(step.get('jump_step', 1) or 1)))
         self.loop_marker_edit.setText(str(step.get('loop_marker', 'i') or 'i'))
-        self.loop_start_spin.setValue(max(1, min(9999, int(step.get('loop_start', 1) or 1))))
-        self.loop_stop_spin.setValue(max(1, min(9999, int(step.get('loop_stop', 1) or 1))))
+        self.loop_start_edit.setText(str(step.get('loop_start', 1) or 1))
+        self.loop_stop_edit.setText(str(step.get('loop_stop', 1) or 1))
         self.loop_enabled_check.setChecked(bool(step.get('loop_enabled', False)))
         self.loop_content_rows_spin.setValue(max(1, min(9999, int(step.get('loop_content_rows', len(step.get('loop_values', []) or []) or 1) or 1))))
         self.loop_content_cols_spin.setValue(max(1, min(30, int(step.get('loop_content_cols', len(step.get('loop_col_labels', []) or step.get('loop_columns', []) or []) or 1) or 1))))
@@ -1136,6 +1206,12 @@ class BrowserFlowWindow(QMainWindow):
         self.drop_position_combo.setCurrentText(step.get('drop_position', '中间'))
         self.drag_offset_x_spin.setValue(int(step.get('drag_offset_x', 0) or 0))
         self.drag_offset_y_spin.setValue(int(step.get('drag_offset_y', 0) or 0))
+        self.drag_steps_spin.setValue(max(1, min(200, int(step.get('drag_steps', 24) or 24))))
+        self.drag_move_seconds_spin.setValue(float(step.get('drag_move_seconds', 0.8) or 0.8))
+        self.drag_hold_seconds_spin.setValue(float(step.get('drag_hold_seconds', 0.2) or 0.0))
+        self.drag_hover_seconds_spin.setValue(float(step.get('drag_hover_seconds', 0.4) or 0.0))
+        self.drag_wait_target_check.setChecked(bool(step.get('drag_wait_target_ready', True)))
+        self.count_result_name_edit.setText(str(step.get('count_result_name', 'n') or 'n'))
         self.value_template_edit.setPlainText(step.get('value_template', ''))
         self.page_condition_expr_edit.setText(step.get('page_condition_expr', ''))
         self.detect_mode_combo.setCurrentText(step.get('detect_mode', '等待判断'))
@@ -1161,8 +1237,8 @@ class BrowserFlowWindow(QMainWindow):
         self.keyboard_hold_seconds_spin.setValue(float(step.get('keyboard_hold_seconds', 1.0) or 1.0))
         self.jump_step_spin.setValue(max(1, int(step.get('jump_step', 1) or 1)))
         self.loop_marker_edit.setText(str(step.get('loop_marker', 'i') or 'i'))
-        self.loop_start_spin.setValue(max(1, min(9999, int(step.get('loop_start', 1) or 1))))
-        self.loop_stop_spin.setValue(max(1, min(9999, int(step.get('loop_stop', 1) or 1))))
+        self.loop_start_edit.setText(str(step.get('loop_start', 1) or 1))
+        self.loop_stop_edit.setText(str(step.get('loop_stop', 1) or 1))
         self.loop_enabled_check.setChecked(bool(step.get('loop_enabled', False)))
         self.loop_content_rows_spin.setValue(max(1, min(9999, int(step.get('loop_content_rows', len(step.get('loop_values', []) or []) or 1) or 1))))
         self.loop_content_cols_spin.setValue(max(1, min(30, int(step.get('loop_content_cols', len(step.get('loop_col_labels', []) or step.get('loop_columns', []) or []) or 1) or 1))))
@@ -1185,6 +1261,12 @@ class BrowserFlowWindow(QMainWindow):
             drop_position=self.drop_position_combo.currentText(),
             drag_offset_x=self.drag_offset_x_spin.value(),
             drag_offset_y=self.drag_offset_y_spin.value(),
+            drag_steps=self.drag_steps_spin.value(),
+            drag_move_seconds=self.drag_move_seconds_spin.value(),
+            drag_hold_seconds=self.drag_hold_seconds_spin.value(),
+            drag_hover_seconds=self.drag_hover_seconds_spin.value(),
+            drag_wait_target_ready=self.drag_wait_target_check.isChecked(),
+            count_result_name=self.count_result_name_edit.text().strip() or 'n',
             value_template=self.value_template_edit.toPlainText(),
             page_condition_expr=self.page_condition_expr_edit.text().strip(),
             detect_mode=self.detect_mode_combo.currentText(),
@@ -1210,8 +1292,8 @@ class BrowserFlowWindow(QMainWindow):
             keyboard_hold_seconds=self.keyboard_hold_seconds_spin.value(),
             jump_step=self.jump_step_spin.value(),
             loop_marker=self.loop_marker_edit.text().strip() or 'i',
-            loop_start=self.loop_start_spin.value(),
-            loop_stop=self.loop_stop_spin.value(),
+            loop_start=self.loop_start_edit.text().strip() or '1',
+            loop_stop=self.loop_stop_edit.text().strip() or '1',
             loop_enabled=self.loop_enabled_check.isChecked(),
             loop_content_rows=self.loop_content_rows_spin.value(),
             loop_content_cols=self.loop_content_cols_spin.value(),
@@ -1263,12 +1345,14 @@ class BrowserFlowWindow(QMainWindow):
             ACTION_WAIT_ELEMENT_GONE, ACTION_SWITCH_IFRAME, ACTION_DRAG,
             ACTION_PAGE_CONDITION, ACTION_ADD_TABLE, ACTION_FILL_TABLE, ACTION_KEY_COMBO,
             ACTION_KEY_PRESS, ACTION_SELECT_ALL, ACTION_CUSTOM_JS, ACTION_CLEAR_NUMBERING, ACTION_MOUSE_MULTI_CLICK,
+            ACTION_COUNT_ELEMENTS,
         )
         value_needed = action in (ACTION_INPUT, ACTION_MULTI_SELECT, ACTION_KEY_COMBO, ACTION_KEY_PRESS, ACTION_FILL_TABLE, ACTION_CUSTOM_JS)
         target_needed = action in (ACTION_DRAG, ACTION_RIGHT_CLICK_MENU, ACTION_DROPDOWN_TWO_STAGE)
         window_needed = action == ACTION_SWITCH_WINDOW
         sleep_needed = action == ACTION_SLEEP
         drag_needed = action == ACTION_DRAG
+        count_needed = action == ACTION_COUNT_ELEMENTS
         detect_needed = action == ACTION_PAGE_CONDITION
         mouse_click_needed = action == ACTION_MOUSE_MULTI_CLICK
         keyboard_needed = action in (ACTION_KEY_PRESS, ACTION_KEY_COMBO)
@@ -1283,6 +1367,8 @@ class BrowserFlowWindow(QMainWindow):
         self._set_form_row_visible(self.target_locator_value_edit, target_needed)
         self._set_form_row_visible(self.drop_position_combo, drag_needed)
         self._set_form_row_visible(self.drag_offset_widget, drag_needed)
+        self._set_form_row_visible(self.drag_timing_widget, drag_needed)
+        self._set_form_row_visible(self.count_result_widget, count_needed)
         self._set_form_row_visible(self.value_template_edit, value_needed and not use_loop_table)
         self._set_form_row_visible(self.field_insert_widget, value_needed and not use_loop_table)
         self._set_form_row_visible(self.page_condition_expr_edit, detect_needed)
@@ -1301,9 +1387,9 @@ class BrowserFlowWindow(QMainWindow):
         self._set_form_row_visible(self.jump_step_widget, jump_needed)
         self._set_form_row_visible(self.loop_end_widget, loop_end_needed)
         self.loop_start_label.setVisible(action == ACTION_LOOP_START)
-        self.loop_start_spin.setVisible(action == ACTION_LOOP_START)
+        self.loop_start_edit.setVisible(action == ACTION_LOOP_START)
         self.loop_stop_label.setVisible(action == ACTION_LOOP_END)
-        self.loop_stop_spin.setVisible(action == ACTION_LOOP_END)
+        self.loop_stop_edit.setVisible(action == ACTION_LOOP_END)
         self._set_form_row_visible(self.loop_widget, value_loop_supported)
         self._set_form_row_visible(self.loop_value_table, use_loop_table)
         self.use_js_click_check.setVisible(action == ACTION_CLICK)
@@ -1460,7 +1546,7 @@ class BrowserFlowWindow(QMainWindow):
             self.step_name_edit, self.step_condition_edit, self.target_locator_value_edit,
             self.page_condition_expr_edit, self.window_match_value_edit,
         ]
-        widgets_text.extend([self.loop_marker_edit, self.loop_row_marker_edit, self.loop_col_marker_edit])
+        widgets_text.extend([self.loop_marker_edit, self.loop_start_edit, self.loop_stop_edit, self.loop_row_marker_edit, self.loop_col_marker_edit, self.count_result_name_edit])
         for widget in widgets_text:
             widget.textChanged.connect(lambda *args: self._save_current_editor_to_flow(auto=True, persist=True))
         self.locator_value_edit.textChanged.connect(lambda: self._save_current_editor_to_flow(auto=True, persist=True))
@@ -1474,15 +1560,16 @@ class BrowserFlowWindow(QMainWindow):
         ):
             combo.currentTextChanged.connect(lambda *args: self._save_current_editor_to_flow(auto=True, persist=True))
         for spin in (
-            self.drag_offset_x_spin, self.drag_offset_y_spin, self.wait_timeout_spin,
-            self.sleep_seconds_spin, self.on_found_step_spin, self.on_not_found_step_spin,
+            self.drag_offset_x_spin, self.drag_offset_y_spin, self.drag_steps_spin,
+            self.drag_move_seconds_spin, self.drag_hold_seconds_spin, self.drag_hover_seconds_spin,
+            self.wait_timeout_spin, self.sleep_seconds_spin, self.on_found_step_spin, self.on_not_found_step_spin,
             self.on_timeout_step_spin, self.mouse_click_count_spin,
-            self.keyboard_hold_seconds_spin, self.jump_step_spin, self.loop_start_spin, self.loop_stop_spin, self.loop_content_rows_spin, self.loop_content_cols_spin,
+            self.keyboard_hold_seconds_spin, self.jump_step_spin, self.loop_content_rows_spin, self.loop_content_cols_spin,
         ):
             spin.valueChanged.connect(lambda *args: self._save_current_editor_to_flow(auto=True, persist=True))
         for line in (self.on_found_message_edit, self.on_not_found_message_edit, self.on_timeout_message_edit):
             line.textChanged.connect(lambda *args: self._save_current_editor_to_flow(auto=True, persist=True))
-        for check in (self.use_js_click_check, self.clear_before_input_check, self.wait_clickable_check):
+        for check in (self.use_js_click_check, self.clear_before_input_check, self.wait_clickable_check, self.drag_wait_target_check):
             check.stateChanged.connect(lambda *args: self._save_current_editor_to_flow(auto=True, persist=True))
         self.loop_enabled_check.stateChanged.connect(lambda *args: (self.update_action_visibility(self.action_combo.currentText()), self.sync_loop_value_table_rows()))
         self.loop_content_rows_spin.valueChanged.connect(lambda *args: self.sync_loop_value_table_rows())
@@ -1757,6 +1844,18 @@ class BrowserFlowWindow(QMainWindow):
         else:
             QMessageBox.information(self, '流程提示', text)
 
+    @staticmethod
+    def _parse_test_step_limit(text, label):
+        value = str(text or '').strip()
+        if not value:
+            return 0
+        if not value.isdigit():
+            raise ValueError(f'{label}必须填写正整数，或留空表示不限制。')
+        num = int(value)
+        if num <= 0:
+            raise ValueError(f'{label}必须大于 0，或留空表示不限制。')
+        return num
+
     def test_import(self):
         parent = self.parent()
         if parent is None or not hasattr(parent, '_last_render_result_text'):
@@ -1772,8 +1871,25 @@ class BrowserFlowWindow(QMainWindow):
                 'data_pool': getattr(parent, '_last_data_pool', {}) or {},
             }
             flow = self.collect_flow(strict=True)
-            self.engine.execute_flow(flow, payload, logger=self.log, alert_handler=self._show_flow_alert)
-            QMessageBox.information(self, '成功', '测试导入执行完成。')
+            start_step = self._parse_test_step_limit(self.test_start_step_edit.text(), '开始步骤')
+            end_step = self._parse_test_step_limit(self.test_end_step_edit.text(), '结束步骤')
+            self.engine.execute_flow(
+                flow,
+                payload,
+                logger=self.log,
+                alert_handler=self._show_flow_alert,
+                start_step_no=start_step or 1,
+                end_step_no=end_step,
+            )
+            if start_step and end_step:
+                msg = f'测试导入执行完成。已执行第 {start_step} 步到第 {end_step} 步。'
+            elif start_step:
+                msg = f'测试导入执行完成。已从第 {start_step} 步执行到流程结束。'
+            elif end_step:
+                msg = f'测试导入执行完成。已从第 1 步执行到第 {end_step} 步。'
+            else:
+                msg = '测试导入执行完成。已执行全流程。'
+            QMessageBox.information(self, '成功', msg)
         except Exception as e:
             QMessageBox.critical(self, '错误', f'测试导入失败：{e}')
             self.log(f'测试导入失败：{e}')
