@@ -54,6 +54,7 @@ class FieldEditDialog(QDialog):
 
 class TemplateEditorWindow(QMainWindow):
     content_changed = pyqtSignal(str, dict)
+    template_saved = pyqtSignal(str, dict)
 
     def __init__(self, main_db: Database, template_name: str, template_db: TemplateDB):
         super().__init__()
@@ -371,6 +372,7 @@ class TemplateEditorWindow(QMainWindow):
         self.template_db.update_process_template(self.template_name, content)
         self.original_content = content
         self._emit_live_content_changed()
+        self.template_saved.emit(self.template_name, copy.deepcopy(content))
         if before != content:
             log_change(f'字段模板修改 - {self.template_name}', before=before, after=content)
         QMessageBox.information(self, "成功", "模板已保存")

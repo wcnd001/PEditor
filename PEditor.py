@@ -1,4 +1,5 @@
 import sys
+import copy
 import json
 import os
 import traceback
@@ -21,12 +22,12 @@ from template_editor import TemplateEditorWindow
 from template_db import TemplateDB
 from datamatch import DataMatcher, RuleManagerDialog
 import export
-from webcontrol import BrowserFlowWindow
+from webcontrol import BrowserFlowWindow, BrowserTaskController, DriverRecoveryController
 from utils import resource_path
 from log import LogViewerDialog, log_change
 from gui_helpers import signal_blocked, wrap_text_flags as _wrap_text_flags
 
-__version__ = '3.9'
+__version__ = '4.0'
 # 主界面输入区的最小布局宽度。左侧分割区域小于此值时，行内控件按该宽度稳定布局，避免长文本反复重排导致卡顿。
 input_option_min_layout_width = 360
 # 打包命令：pyinstaller --clean PEditor.spec --distpath "D:\Microsoft Visual Studio\code"
@@ -1855,6 +1856,10 @@ class PEditor(QMainWindow):
         self.template_editor_window = None
         self.browser_flow_window = None
         self.settings_file = self._get_settings_path()
+        self._last_template_name = ''
+        self._browser_input_backup = {}
+        self._browser_log_buffer = []
+        self._closing_application = False
         self._live_process_content = None
         self._last_export_signature = None
         self._last_render_result_text = ''
@@ -1866,12 +1871,21 @@ class PEditor(QMainWindow):
         self._live_refresh_timer = QTimer(self)
         self._live_refresh_timer.setInterval(250)
         self._live_refresh_timer.timeout.connect(self._poll_live_updates)
+        self.browser_task_controller = BrowserTaskController(export.get_engine(), self)
+        self.browser_task_controller.log_message.connect(self._append_browser_log)
+        self.browser_task_controller.alert_message.connect(self._show_browser_alert)
+        self.browser_task_controller.succeeded.connect(self._on_browser_export_succeeded)
+        self.browser_task_controller.failed.connect(self._on_browser_export_failed)
+        self.browser_task_controller.stopped.connect(self._on_browser_export_stopped)
+        self.driver_recovery_controller = DriverRecoveryController(export.get_engine(), self)
+        self.driver_recovery_controller.log_message.connect(self._append_browser_log)
+        self.driver_recovery_controller.failed.connect(self._on_driver_recovery_failed)
 
         self.init_ui()
+        self.load_settings()
         self.load_template_list()
         self.refresh_input_area()
         self.update_copy_buttons_from_config()
-        self.load_settings()
         self._live_refresh_timer.start()
 
 
@@ -2602,6 +2616,13 @@ class PEditor(QMainWindow):
                 pass
         self.update_result_text(force=True)
 
+    def on_process_template_saved(self, template_name, content):
+        if template_name != self.current_template_name:
+            return
+        self._live_process_content = content
+        self.update_copy_buttons_from_config()
+        self.update_result_text(force=True)
+
     def on_external_data_changed(self):
         preserved = self._remember_input_values()
         self.refresh_input_area(preserved)
@@ -2701,6 +2722,7 @@ class PEditor(QMainWindow):
             ('打开浏览器', self.open_browser_from_main, 'open_browser_btn'),
             ('浏览器配置', self.open_browser_flow_editor, 'browser_cfg_btn'),
             ('导出至浏览器', self.export_current_to_browser, 'browser_export_btn'),
+            ('强制结束进程', self.stop_browser_thread, 'browser_stop_thread_btn'),
         ])
 
         self.copy_tool_btn = ToolbarMenuButton(self)
@@ -2906,6 +2928,9 @@ class PEditor(QMainWindow):
         if not self.current_template_name:
             QMessageBox.warning(self, '提示', '请先选择模板。')
             return
+        if export.get_engine().is_flow_running() or export.get_engine().is_driver_recovery_pending():
+            QMessageBox.information(self, '提示', '浏览器导入线程运行中，暂不能重新打开浏览器。')
+            return
         self._save_browser_settings_for_current_template(silent=True)
         try:
             browser = self._get_browser_settings_for_current_template()
@@ -2923,10 +2948,12 @@ class PEditor(QMainWindow):
 
     def load_settings(self):
         settings = self._load_settings_payload()
+        self._last_template_name = str(settings.get('last_template_name', '') or '').strip()
         self.apply_ui_settings(settings)
 
     def save_settings(self, settings):
         payload = self._normalize_ui_settings(settings)
+        payload['last_template_name'] = str(self.current_template_name or self._last_template_name or '').strip()
         try:
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -3001,7 +3028,13 @@ class PEditor(QMainWindow):
 
         self._live_process_content = None
         if temps:
-            target_name = previous if previous and any(t['name'] == previous for t in temps) else temps[0]['name']
+            names = {t['name'] for t in temps}
+            if previous and previous in names:
+                target_name = previous
+            elif self._last_template_name and self._last_template_name in names:
+                target_name = self._last_template_name
+            else:
+                target_name = temps[0]['name']
             with signal_blocked(self.template_combo):
                 self.template_combo.setCurrentText(target_name)
             self._load_template_by_name(target_name)
@@ -3018,6 +3051,7 @@ class PEditor(QMainWindow):
 
     def _load_template_by_name(self, name):
         self.current_template_name = name
+        self._last_template_name = name
         index = self.template_combo.findText(name)
         data = self.template_combo.itemData(index) if index >= 0 else None
         if data:
@@ -3618,7 +3652,7 @@ class PEditor(QMainWindow):
             name = str(field or '').strip()
             if not name or name in seen:
                 continue
-            if available and name not in available:
+            if name not in available:
                 continue
             seen.add(name)
             result.append(name)
@@ -4142,30 +4176,117 @@ class PEditor(QMainWindow):
         if not self.current_template_name:
             QMessageBox.warning(self, '提示', '请先选择模板。')
             return
-        self.update_result_text(force=True)
-        flow_override = None
+        engine = export.get_engine()
+        if self.browser_task_controller.is_running() or engine.is_flow_running() or engine.is_driver_recovery_pending():
+            QMessageBox.information(self, '提示', '已有浏览器导入线程正在运行。')
+            return
+        try:
+            self._browser_input_backup = copy.deepcopy(self.collect_input_values())
+            self.update_result_text(force=True)
+            if self.browser_flow_window is not None:
+                flow = self.browser_flow_window.collect_flow()
+            else:
+                flow = self.template_db.get_browser_flow(self.current_template_name)
+            if not flow:
+                self._browser_input_backup = {}
+                QMessageBox.warning(self, '提示', '当前模板未配置浏览器流程。')
+                return
+            input_values = copy.deepcopy(self._last_input_values)
+            payload = {
+                'template_name': self.current_template_name,
+                'result_text': self._last_render_result_text,
+                'rendered_fields': self.build_browser_rendered_fields(input_values),
+                'final_fields': self._last_final_fields,
+                'input_values': input_values,
+                'data_pool': self._last_data_pool,
+            }
+            self._append_browser_log('开始执行浏览器导入。')
+            if not self.browser_task_controller.start(copy.deepcopy(flow), copy.deepcopy(payload)):
+                self._browser_input_backup = {}
+                QMessageBox.information(self, '提示', '已有浏览器导入线程正在运行。')
+        except Exception as e:
+            self._browser_input_backup = {}
+            self._append_browser_log(f'浏览器导入失败：{e}')
+            QMessageBox.critical(self, '错误', '浏览器导入错误。')
+
+    def _append_browser_log(self, message):
+        text = str(message or '')
+        if not text:
+            return
+        window = self.browser_flow_window
+        if window is not None:
+            try:
+                window.log(text)
+                return
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
+        self._browser_log_buffer.append(text)
+        if len(self._browser_log_buffer) > 2000:
+            self._browser_log_buffer = self._browser_log_buffer[-2000:]
+
+    def _on_browser_export_succeeded(self):
+        self._append_browser_log('浏览器导入执行完成。')
+        self._browser_input_backup = {}
+        if not self._closing_application:
+            QMessageBox.information(self, '成功', '浏览器导入已完成。')
+
+    def _on_browser_export_failed(self, error_text):
+        self._append_browser_log(f'浏览器导入失败：{error_text}')
+        self._browser_input_backup = {}
+        if not self._closing_application:
+            QMessageBox.critical(self, '错误', '浏览器导入错误。')
+
+    def _on_browser_export_stopped(self, message):
+        self._append_browser_log(message or '浏览器导入已中止。')
+        self._browser_input_backup = {}
+        if not self._closing_application:
+            if '强制' in str(message or ''):
+                QMessageBox.information(self, '提示', '浏览器自动控制已强制结束。')
+            else:
+                QMessageBox.information(self, '提示', '浏览器导入已中止。')
+
+    def _on_driver_recovery_failed(self, error_text):
+        self._append_browser_log(f'ChromeDriver 自动重建失败：{error_text}')
+        if not self._closing_application:
+            QMessageBox.critical(self, '错误', 'ChromeDriver 自动重建失败。')
+
+    def _start_driver_recovery(self):
+        engine = export.get_engine()
+        if self._closing_application or not engine.is_driver_recovery_pending():
+            return
+        force_rebuild = self.browser_task_controller.is_running()
         if self.browser_flow_window is not None:
             try:
-                flow_override = self.browser_flow_window.collect_flow()
-            except Exception as e:
-                QMessageBox.warning(self, '提示', f'读取当前浏览器流程配置失败：{e}')
-                return
-        browser_rendered_fields = self.build_browser_rendered_fields(self._last_input_values)
-        success, message = export.export_to_browser(
-            self.template_db,
-            self.current_template_name,
-            self._last_render_result_text,
-            self._last_final_fields,
-            self._last_input_values,
-            data_pool=self._last_data_pool,
-            rendered_fields=browser_rendered_fields,
-            flow_override=flow_override,
-            alert_handler=self._show_browser_alert,
-        )
-        if success:
-            QMessageBox.information(self, '成功', '已执行浏览器导出。\n\n' + (message[-800:] if message else ''))
+                force_rebuild = self.browser_flow_window.task_controller.is_running() or force_rebuild
+            except Exception:
+                pass
+        try:
+            if not self.driver_recovery_controller.start(force_rebuild=force_rebuild):
+                engine.finish_driver_recovery()
+        except Exception as e:
+            engine.finish_driver_recovery()
+            self._on_driver_recovery_failed(str(e))
+
+    def stop_browser_thread(self):
+        engine = export.get_engine()
+        if not engine.is_flow_running():
+            QMessageBox.information(self, '提示', '当前没有正在运行的浏览器导入线程。')
+            return
+        terminated = self.browser_task_controller.force_terminate()
+        if self.browser_flow_window is not None:
+            try:
+                terminated = self.browser_flow_window.force_terminate_browser_task() or terminated
+            except Exception:
+                pass
+        if terminated:
+            engine.begin_driver_recovery()
+            self._append_browser_log('已强制结束浏览器自动控制；3秒后检查 ChromeDriver，受控 Chrome 保持打开。')
+            QTimer.singleShot(3000, self._start_driver_recovery)
         else:
-            QMessageBox.warning(self, '提示', message or '浏览器导出失败。')
+            engine.request_stop()
+            self._append_browser_log('未找到活动工作线程，已发送停止请求。')
 
     def clear_inputs(self):
         for widget in self.input_widgets:
@@ -4199,6 +4320,7 @@ class PEditor(QMainWindow):
             self.template_editor_window = TemplateEditorWindow(self.db, self.current_template_name, self.template_db)
             self.template_editor_window.setAttribute(Qt.WA_DeleteOnClose, True)
             self.template_editor_window.content_changed.connect(self.on_live_process_template_changed)
+            self.template_editor_window.template_saved.connect(self.on_process_template_saved)
             self.template_editor_window.destroyed.connect(self.on_template_editor_closed)
         else:
             self.template_editor_window.template_name = self.current_template_name
@@ -4221,6 +4343,10 @@ class PEditor(QMainWindow):
         else:
             self.browser_flow_window.set_template_name(self.current_template_name)
         self._apply_generic_window_ui_settings(self.browser_flow_window)
+        if self._browser_log_buffer:
+            for message in self._browser_log_buffer:
+                self.browser_flow_window.log(message)
+            self._browser_log_buffer = []
         self.browser_flow_window.show()
         self.browser_flow_window.raise_()
         self.browser_flow_window.activateWindow()
@@ -4257,15 +4383,40 @@ class PEditor(QMainWindow):
             return True
 
     def closeEvent(self, event):
+        self._closing_application = True
+        engine = export.get_engine()
+        engine.request_stop()
+        self.browser_task_controller.request_stop()
+        if self.browser_flow_window is not None:
+            try:
+                self.browser_flow_window._force_closing = True
+                self.browser_flow_window.stop_test_import()
+            except Exception:
+                pass
+        self.driver_recovery_controller.shutdown(wait_ms=1500, force=True)
+        try:
+            engine.shutdown_driver_only()
+        except Exception:
+            pass
+        self.browser_task_controller.shutdown(wait_ms=1500, force=True)
+        if self.browser_flow_window is not None:
+            try:
+                self.browser_flow_window.shutdown_browser_task(force=True, wait_ms=1500)
+            except Exception:
+                pass
         children_ok = True
         for window in (self.browser_flow_window, self.template_editor_window, self.data_manager_window):
             if not self._try_close_child_window(window):
                 children_ok = False
                 break
         if not children_ok:
+            self._closing_application = False
+            if self.browser_flow_window is not None:
+                self.browser_flow_window._force_closing = False
             event.ignore()
             return
         self._live_refresh_timer.stop()
+        self.save_settings(getattr(self, '_ui_settings', self._default_ui_settings()))
         self.db.close()
         self.template_db.close()
         event.accept()

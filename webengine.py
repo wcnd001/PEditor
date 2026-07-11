@@ -1,6 +1,10 @@
 import json
+import os
 import re
+import subprocess
+import threading
 import time
+import urllib.request
 from decimal import Decimal, ROUND_HALF_UP, ROUND_UP
 from typing import Callable, List, Optional
 
@@ -19,6 +23,10 @@ class BrowserEngineError(Exception):
     pass
 
 
+class BrowserEngineStopped(BrowserEngineError):
+    pass
+
+
 class BrowserEngine:
     def __init__(self):
         self.driver = None
@@ -26,6 +34,11 @@ class BrowserEngine:
         self.preferred_window_handle = None
         self.current_config = {}
         self.current_implicit_wait = 0.0
+        self.browser_process_id = None
+        self._stop_event = threading.Event()
+        self._flow_lock = threading.Lock()
+        self._flow_running = False
+        self._recovery_pending = False
 
     def is_connected(self) -> bool:
         try:
@@ -69,7 +82,62 @@ class BrowserEngine:
     def _create_driver(self, chromedriver_path: str, options: Options):
         chromedriver_path = self._normalize_path(chromedriver_path)
         service = Service(executable_path=chromedriver_path) if chromedriver_path else Service()
+        if os.name == 'nt':
+            service.creation_flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
         return webdriver.Chrome(service=service, options=options)
+
+    def reserve_flow_run(self) -> bool:
+        if self._recovery_pending:
+            return False
+        if not self._flow_lock.acquire(blocking=False):
+            return False
+        self._stop_event.clear()
+        self._flow_running = True
+        return True
+
+    def _release_flow_run(self):
+        self._flow_running = False
+        try:
+            if self._flow_lock.locked():
+                self._flow_lock.release()
+        except Exception:
+            pass
+
+    def is_flow_running(self) -> bool:
+        return bool(self._flow_running)
+
+    def begin_driver_recovery(self):
+        self._recovery_pending = True
+
+    def finish_driver_recovery(self):
+        self._recovery_pending = False
+
+    def is_driver_recovery_pending(self) -> bool:
+        return bool(self._recovery_pending)
+
+    def request_stop(self):
+        self._stop_event.set()
+
+    def stop_requested(self) -> bool:
+        return bool(self._stop_event.is_set())
+
+    def _check_stop(self):
+        if self._flow_running and self._stop_event.is_set():
+            raise BrowserEngineStopped('浏览器导入已中止。')
+
+    def _sleep_with_stop(self, seconds: float):
+        seconds = max(0.0, float(seconds or 0))
+        if not self._flow_running:
+            time.sleep(seconds)
+            return
+        if self._stop_event.wait(seconds):
+            self._check_stop()
+
+    def _wait_until(self, condition, timeout: float):
+        def stop_aware_condition(driver):
+            self._check_stop()
+            return condition(driver)
+        return WebDriverWait(self.driver, timeout, poll_frequency=0.2).until(stop_aware_condition)
 
     def launch_browser(self, chromedriver_path: str, chrome_binary: str = '', start_url: str = '', debug_port: int = 9222, logger=None):
         start_url = self.normalize_url(start_url)
@@ -92,7 +160,9 @@ class BrowserEngine:
                 '--disable-backgrounding-occluded-windows',
             ],
         )
+        options.add_experimental_option('detach', True)
         self.driver = self._create_driver(chromedriver_path, options)
+        self.browser_process_id = self._browser_pid_from_driver(self.driver) or self._find_debug_port_process_id(debug_port)
         self.main_window_handle = self.driver.current_window_handle
         self.preferred_window_handle = self.main_window_handle
         self.current_config = {
@@ -101,6 +171,7 @@ class BrowserEngine:
             'chrome_binary': chrome_binary,
             'start_url': start_url,
             'debug_port': debug_port,
+            'debug_address': f'127.0.0.1:{int(debug_port)}',
         }
         if start_url:
             self.driver.get(start_url)
@@ -119,16 +190,245 @@ class BrowserEngine:
         debug_port = int(browser_config.get('debug_port', 9222) or 9222)
         return self.launch_browser(chromedriver_path, chrome_binary=chrome_binary, start_url=start_url, debug_port=debug_port, logger=logger)
 
-    def disconnect(self):
-        if self.driver is not None:
+    @staticmethod
+    def _browser_pid_from_driver(driver):
+        try:
+            capabilities = getattr(driver, 'capabilities', {}) or {}
+            value = capabilities.get('goog:processID')
+            if value is None:
+                value = (capabilities.get('goog:chromeOptions', {}) or {}).get('processID')
+            return int(value) if value else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _find_debug_port_process_id(debug_port):
+        if os.name != 'nt':
+            return None
+        try:
+            output = subprocess.check_output(
+                ['netstat', '-ano', '-p', 'tcp'],
+                text=True,
+                errors='ignore',
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000),
+            )
+            port_token = f':{int(debug_port)}'
+            for line in output.splitlines():
+                parts = line.split()
+                if len(parts) >= 5 and port_token in parts[1] and parts[3].upper() == 'LISTENING':
+                    return int(parts[4])
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _driver_status_url(driver):
+        try:
+            service_url = str(getattr(getattr(driver, 'service', None), 'service_url', '') or '').rstrip('/')
+            if service_url:
+                return service_url + '/status'
+        except Exception:
+            pass
+        try:
+            executor_url = str(getattr(getattr(driver, 'command_executor', None), '_url', '') or '').rstrip('/')
+            if executor_url:
+                return executor_url + '/status'
+        except Exception:
+            pass
+        return ''
+
+    def _driver_is_responsive(self, driver, timeout=0.5) -> bool:
+        status_url = self._driver_status_url(driver)
+        if not status_url:
+            return False
+        try:
+            with urllib.request.urlopen(status_url, timeout=max(0.1, float(timeout))) as response:
+                return 200 <= int(getattr(response, 'status', 200) or 200) < 500
+        except Exception:
+            return False
+
+    @staticmethod
+    def _terminate_driver_only(driver):
+        service = getattr(driver, 'service', None)
+        process = getattr(service, 'process', None)
+        if process is None or process.poll() is not None:
+            return
+        try:
+            if os.name == 'nt':
+                subprocess.run(
+                    ['taskkill', '/F', '/PID', str(process.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=3,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000),
+                    check=False,
+                )
+            else:
+                process.kill()
+                process.wait(timeout=1)
+        except Exception:
             try:
-                self.driver.quit()
+                process.kill()
             except Exception:
                 pass
+
+    def recover_driver_if_unresponsive(self, logger=None, force_rebuild=False):
+        driver = self.driver
+        try:
+            if driver is None:
+                self._log(logger, '当前没有可恢复的 ChromeDriver。')
+                return False
+            if not force_rebuild and self._driver_is_responsive(driver, timeout=0.5):
+                self._log(logger, 'ChromeDriver 已恢复响应，无需重建。')
+                return False
+
+            config = dict(self.current_config or {})
+            chromedriver_path = config.get('chromedriver_path', '')
+            debug_port = int(config.get('debug_port', 9222) or 9222)
+            debug_address = str(config.get('debug_address') or f'127.0.0.1:{debug_port}')
+            old_main_handle = self.main_window_handle
+            old_preferred_handle = self.preferred_window_handle
+            old_browser_pid = self.browser_process_id or self._browser_pid_from_driver(driver)
+
+            self.driver = None
+            self._terminate_driver_only(driver)
+            options = self._build_options()
+            options.add_experimental_option('debuggerAddress', debug_address)
+            options.add_experimental_option('detach', True)
+            new_driver = self._create_driver(chromedriver_path, options)
+            handles = list(new_driver.window_handles)
+            self.driver = new_driver
+            self.browser_process_id = self._browser_pid_from_driver(new_driver) or old_browser_pid or self._find_debug_port_process_id(debug_port)
+            self.main_window_handle = old_main_handle if old_main_handle in handles else (handles[0] if handles else None)
+            self.preferred_window_handle = old_preferred_handle if old_preferred_handle in handles else self.main_window_handle
+            self.current_config = config
+            if self.preferred_window_handle:
+                try:
+                    new_driver.switch_to.window(self.preferred_window_handle)
+                except Exception:
+                    pass
+            self._log(logger, 'ChromeDriver 已自动重建，并重新连接到原受控 Chrome。')
+            return True
+        finally:
+            self.finish_driver_recovery()
+
+    def disconnect(self):
+        driver = self.driver
         self.driver = None
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+            service = getattr(driver, 'service', None)
+            process = getattr(service, 'process', None)
+            try:
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=1)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
         self.main_window_handle = None
         self.preferred_window_handle = None
+        self.browser_process_id = None
         self.current_config = {}
+
+    @staticmethod
+    def _terminate_driver_process_tree(driver):
+        service = getattr(driver, 'service', None)
+        process = getattr(service, 'process', None)
+        if process is None or process.poll() is not None:
+            return
+        try:
+            if os.name == 'nt':
+                subprocess.run(
+                    ['taskkill', '/F', '/T', '/PID', str(process.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=3,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000),
+                    check=False,
+                )
+            else:
+                process.terminate()
+                process.wait(timeout=1)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _terminate_driver_process_only(driver):
+        service = getattr(driver, 'service', None)
+        process = getattr(service, 'process', None)
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=1)
+        except Exception:
+            try:
+                process.kill()
+                process.wait(timeout=1)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _terminate_process_tree_by_pid(process_id):
+        if not process_id:
+            return
+        try:
+            if os.name == 'nt':
+                subprocess.run(
+                    ['taskkill', '/F', '/T', '/PID', str(int(process_id))],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=3,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000),
+                    check=False,
+                )
+            else:
+                os.kill(int(process_id), 9)
+        except Exception:
+            pass
+
+    def shutdown(self):
+        self.request_stop()
+        try:
+            self.stop_element_recording()
+        except Exception:
+            pass
+        driver = self.driver
+        browser_process_id = self.browser_process_id or self._browser_pid_from_driver(driver)
+        self.driver = None
+        if driver is not None:
+            self._terminate_driver_process_tree(driver)
+        self._terminate_process_tree_by_pid(browser_process_id)
+        self.main_window_handle = None
+        self.preferred_window_handle = None
+        self.browser_process_id = None
+        self.current_config = {}
+        self.finish_driver_recovery()
+
+    def shutdown_driver_only(self):
+        self.request_stop()
+        try:
+            self.stop_element_recording()
+        except Exception:
+            pass
+        driver = self.driver
+        self.driver = None
+        if driver is not None:
+            self._terminate_driver_process_only(driver)
+        self.main_window_handle = None
+        self.preferred_window_handle = None
+        self.browser_process_id = None
+        self.current_config = {}
+        self.finish_driver_recovery()
 
     def _safe_window_handles(self) -> List[str]:
         if not self.driver:
@@ -332,17 +632,15 @@ class BrowserEngine:
             raise BrowserEngineError('浏览器未连接')
         self.repair_session_window(activate_preferred=True)
         by = self._locator_to_by(locator_type)
-        wait = WebDriverWait(self.driver, timeout)
         condition = EC.element_to_be_clickable((by, locator_value)) if clickable else EC.presence_of_element_located((by, locator_value))
-        return wait.until(condition)
+        return self._wait_until(condition, timeout)
 
     def wait_for_element_gone(self, locator_type: str, locator_value: str, timeout: float = 10):
         if not self.is_connected():
             raise BrowserEngineError('浏览器未连接')
         self.repair_session_window(activate_preferred=True)
         by = self._locator_to_by(locator_type)
-        wait = WebDriverWait(self.driver, timeout)
-        return wait.until(EC.invisibility_of_element_located((by, locator_value)))
+        return self._wait_until(EC.invisibility_of_element_located((by, locator_value)), timeout)
 
     def _find_elements(self, locator_type: str, locator_value: str):
         if not self.is_connected():
@@ -416,7 +714,7 @@ class BrowserEngine:
                 return element
             except Exception as e:
                 last_error = e
-                time.sleep(0.2)
+                self._sleep_with_stop(0.2)
         if last_error:
             raise last_error
         raise BrowserEngineError('未找到元素')
@@ -454,7 +752,7 @@ class BrowserEngine:
                     continue
             return fallback if fallback is not None else False
 
-        return WebDriverWait(self.driver, timeout).until(condition)
+        return self._wait_until(condition, timeout)
 
     @staticmethod
     def _element_center_is_covered(driver, element) -> bool:
@@ -481,7 +779,7 @@ class BrowserEngine:
                 last_rect = current
             except Exception:
                 return
-            time.sleep(0.08)
+            self._sleep_with_stop(0.08)
 
     def _js_click_element(self, element):
         """用 JS 触发鼠标事件和 click，作为小弹窗/自定义按钮的兜底点击。"""
@@ -996,7 +1294,7 @@ class BrowserEngine:
                         except Exception:
                             continue
                     return False
-                fresh_target = WebDriverWait(self.driver, max(0.1, float(timeout))).until(target_ready)
+                fresh_target = self._wait_until(target_ready, max(0.1, float(timeout)))
                 try:
                     ActionChains(self.driver).move_to_element_with_offset(fresh_target, offset_x, offset_y).pause(hover_seconds).release().perform()
                 except Exception:
@@ -1060,7 +1358,7 @@ class BrowserEngine:
             except Exception:
                 current = None
             return bool(main_handle and current == main_handle and main_handle in handles)
-        WebDriverWait(self.driver, timeout).until(condition)
+        self._wait_until(condition, timeout)
         self.switch_to_main_window()
         return True
 
@@ -1998,9 +2296,29 @@ class BrowserEngine:
         label = ','.join(f'{k}={v}' for k, v in merged_vars.items() if not str(k).startswith('__'))
         return loop_step, self._loop_payload(payload, merged_vars), label
 
-    def execute_flow(self, flow_config: dict, payload: dict, logger=None, alert_handler=None, start_step_no: int = 1, end_step_no: int = 0):
+    def execute_flow(self, flow_config: dict, payload: dict, logger=None, alert_handler=None, start_step_no: int = 1, end_step_no: int = 0, _reserved: bool = False):
+        if not _reserved:
+            if not self.reserve_flow_run():
+                raise BrowserEngineError('已有浏览器导入线程正在运行。')
+        elif not self._flow_running:
+            raise BrowserEngineError('浏览器导入线程没有取得执行权限。')
+        try:
+            return self._execute_flow(
+                flow_config,
+                payload,
+                logger=logger,
+                alert_handler=alert_handler,
+                start_step_no=start_step_no,
+                end_step_no=end_step_no,
+            )
+        finally:
+            self._release_flow_run()
+
+    def _execute_flow(self, flow_config: dict, payload: dict, logger=None, alert_handler=None, start_step_no: int = 1, end_step_no: int = 0):
+        self._check_stop()
         browser_cfg = (flow_config or {}).get('browser', {}) or {}
         self.ensure_connected(browser_cfg, logger=logger)
+        self._check_stop()
 
         implicit_wait = float(browser_cfg.get('implicit_wait', 0) or 0)
         # 流程执行主要依靠每个步骤的显式等待。隐式等待过长会和显式等待叠加，
@@ -2039,6 +2357,7 @@ class BrowserEngine:
         elif end_index is not None:
             self._log(logger, f'测试导入执行到第 {end_index + 1} 步后停止。')
         while idx < len(steps) and (end_index is None or idx <= end_index):
+            self._check_stop()
             raw_step = steps[idx] or {}
             raw_action = (raw_step.get('action') or '').strip()
 
@@ -2137,7 +2456,7 @@ class BrowserEngine:
 
             elif action == '等待新窗口':
                 old_count = context.get('last_window_count', len(self.driver.window_handles))
-                WebDriverWait(self.driver, timeout).until(lambda d: len(d.window_handles) > old_count)
+                self._wait_until(lambda d: len(d.window_handles) > old_count, timeout)
                 context['last_window_count'] = len(self.driver.window_handles)
 
             elif action == '等待窗口关闭/等待回到主窗口':
@@ -2159,7 +2478,7 @@ class BrowserEngine:
                 self.driver.switch_to.default_content()
 
             elif action == '延时':
-                time.sleep(float(step.get('sleep_seconds', 1) or 1))
+                self._sleep_with_stop(float(step.get('sleep_seconds', 1) or 1))
 
             elif action == '页面条件判断':
                 result_key = self._evaluate_page_condition(step, step_payload, timeout=timeout)
@@ -2209,6 +2528,7 @@ class BrowserEngine:
             else:
                 raise BrowserEngineError(f'不支持的动作：{action}')
 
+            self._check_stop()
             idx = next_index
 
         return True

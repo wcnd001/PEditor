@@ -1,7 +1,7 @@
 import copy
 import json
 from log import log_change
-from PyQt5.QtCore import Qt, QTimer, QEvent, QSize
+from PyQt5.QtCore import Qt, QTimer, QEvent, QSize, QObject, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -36,6 +36,7 @@ from PyQt5.QtWidgets import (
 
 from PyQt5.QtGui import QFontMetrics, QPalette
 from gui_helpers import signal_blocked
+from webengine import BrowserEngineStopped
 
 
 
@@ -130,6 +131,241 @@ TAB_MODES = ['直接输入', '删除', '转为4空格', '转为\\t']
 SPACE_MODES = ['直接输入', '压缩为1个', '删除全部']
 
 
+class BrowserTaskWorker(QObject):
+    log_message = pyqtSignal(str)
+    alert_message = pyqtSignal(str, str)
+    succeeded = pyqtSignal()
+    failed = pyqtSignal(str)
+    stopped = pyqtSignal(str)
+    finished = pyqtSignal()
+
+    def __init__(self, engine, flow, payload, start_step_no=1, end_step_no=0):
+        super().__init__()
+        self.engine = engine
+        self.flow = flow
+        self.payload = payload
+        self.start_step_no = start_step_no
+        self.end_step_no = end_step_no
+
+    def run(self):
+        try:
+            self.engine.execute_flow(
+                self.flow,
+                self.payload,
+                logger=self.log_message.emit,
+                alert_handler=self.alert_message.emit,
+                start_step_no=self.start_step_no,
+                end_step_no=self.end_step_no,
+                _reserved=True,
+            )
+        except BrowserEngineStopped as e:
+            self.stopped.emit(str(e) or '浏览器导入已中止。')
+        except Exception as e:
+            self.failed.emit(str(e))
+        else:
+            self.succeeded.emit()
+        finally:
+            self.finished.emit()
+
+
+class BrowserTaskController(QObject):
+    log_message = pyqtSignal(str)
+    alert_message = pyqtSignal(str, str)
+    succeeded = pyqtSignal()
+    failed = pyqtSignal(str)
+    stopped = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+
+    def __init__(self, engine, parent=None):
+        super().__init__(parent)
+        self.engine = engine
+        self._thread = None
+        self._worker = None
+        self._force_terminating = False
+        self._ignore_worker_result = False
+
+    def is_running(self):
+        return self._worker is not None
+
+    def start(self, flow, payload, start_step_no=1, end_step_no=0):
+        if self.is_running() or not self.engine.reserve_flow_run():
+            return False
+        thread = QThread(self)
+        worker = BrowserTaskWorker(
+            self.engine,
+            flow,
+            payload,
+            start_step_no=start_step_no,
+            end_step_no=end_step_no,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.log_message.connect(self.log_message)
+        worker.alert_message.connect(self.alert_message)
+        worker.succeeded.connect(self._forward_succeeded)
+        worker.failed.connect(self._forward_failed)
+        worker.stopped.connect(self._forward_stopped)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._on_thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._thread = thread
+        self._worker = worker
+        self._force_terminating = False
+        self._ignore_worker_result = False
+        self.running_changed.emit(True)
+        try:
+            thread.start()
+        except Exception:
+            self._thread = None
+            self._worker = None
+            self.engine._release_flow_run()
+            self.running_changed.emit(False)
+            raise
+        return True
+
+    def request_stop(self):
+        if not self.is_running():
+            return False
+        self.engine.request_stop()
+        return True
+
+    def force_terminate(self):
+        thread = self._thread
+        if thread is None or not thread.isRunning():
+            return False
+        self._force_terminating = True
+        self._ignore_worker_result = True
+        self.engine.request_stop()
+        thread.terminate()
+        return True
+
+    def shutdown(self, wait_ms=3000, force=False):
+        thread = self._thread
+        if thread is None:
+            return True
+        self.engine.request_stop()
+        thread.quit()
+        if thread.isRunning():
+            thread.wait(max(0, int(wait_ms)))
+        if thread.isRunning() and force:
+            thread.terminate()
+            thread.wait(1000)
+            self.engine._release_flow_run()
+        return not thread.isRunning()
+
+    def _forward_succeeded(self):
+        if not self._ignore_worker_result:
+            self.succeeded.emit()
+
+    def _forward_failed(self, error_text):
+        if not self._ignore_worker_result:
+            self.failed.emit(error_text)
+
+    def _forward_stopped(self, message):
+        if not self._ignore_worker_result:
+            self.stopped.emit(message)
+
+    def _on_thread_finished(self):
+        forced = self._force_terminating
+        self.engine._release_flow_run()
+        self._thread = None
+        self._worker = None
+        self._force_terminating = False
+        self.running_changed.emit(False)
+        if forced:
+            self.stopped.emit('浏览器自动控制已强制终止，ChromeDriver 和受控 Chrome 保持打开。')
+
+
+class DriverRecoveryWorker(QObject):
+    log_message = pyqtSignal(str)
+    succeeded = pyqtSignal(bool)
+    failed = pyqtSignal(str)
+    finished = pyqtSignal()
+
+    def __init__(self, engine, force_rebuild=False):
+        super().__init__()
+        self.engine = engine
+        self.force_rebuild = bool(force_rebuild)
+
+    def run(self):
+        try:
+            rebuilt = self.engine.recover_driver_if_unresponsive(
+                logger=self.log_message.emit,
+                force_rebuild=self.force_rebuild,
+            )
+        except Exception as e:
+            self.failed.emit(str(e))
+        else:
+            self.succeeded.emit(bool(rebuilt))
+        finally:
+            self.finished.emit()
+
+
+class DriverRecoveryController(QObject):
+    log_message = pyqtSignal(str)
+    succeeded = pyqtSignal(bool)
+    failed = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+
+    def __init__(self, engine, parent=None):
+        super().__init__(parent)
+        self.engine = engine
+        self._thread = None
+        self._worker = None
+
+    def is_running(self):
+        return self._worker is not None
+
+    def start(self, force_rebuild=False):
+        if self.is_running():
+            return False
+        thread = QThread(self)
+        worker = DriverRecoveryWorker(self.engine, force_rebuild=force_rebuild)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.log_message.connect(self.log_message)
+        worker.succeeded.connect(self.succeeded)
+        worker.failed.connect(self.failed)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._on_thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._thread = thread
+        self._worker = worker
+        self.running_changed.emit(True)
+        try:
+            thread.start()
+        except Exception:
+            self._thread = None
+            self._worker = None
+            self.engine.finish_driver_recovery()
+            self.running_changed.emit(False)
+            raise
+        return True
+
+    def shutdown(self, wait_ms=1500, force=False):
+        thread = self._thread
+        if thread is None:
+            self.engine.finish_driver_recovery()
+            return True
+        thread.quit()
+        if thread.isRunning():
+            thread.wait(max(0, int(wait_ms)))
+        if thread.isRunning() and force:
+            thread.terminate()
+            thread.wait(1000)
+        self.engine.finish_driver_recovery()
+        return not thread.isRunning()
+
+    def _on_thread_finished(self):
+        self._thread = None
+        self._worker = None
+        self.running_changed.emit(False)
+
+
 class BrowserFlowWindow(QMainWindow):
     def _init_window_geometry(self):
         screen = None
@@ -158,6 +394,17 @@ class BrowserFlowWindow(QMainWindow):
         self._updating_step_form_widths = False
         self._loaded_signature = ''
         self.recorded_element = None
+        self._test_input_backup = {}
+        self._test_success_message = ''
+        self._close_after_task = False
+        self._force_closing = False
+        self.task_controller = BrowserTaskController(self.engine, self)
+        self.task_controller.log_message.connect(self.log)
+        self.task_controller.alert_message.connect(self._show_flow_alert)
+        self.task_controller.succeeded.connect(self._on_test_import_succeeded)
+        self.task_controller.failed.connect(self._on_test_import_failed)
+        self.task_controller.stopped.connect(self._on_test_import_stopped)
+        self.task_controller.running_changed.connect(self._on_test_running_changed)
         self.record_timer = QTimer(self)
         self.record_timer.setInterval(250)
         self.record_timer.timeout.connect(self.poll_recorded_element)
@@ -943,6 +1190,10 @@ class BrowserFlowWindow(QMainWindow):
         self.set_selected_window_as_target(auto=True)
 
     def set_selected_window_as_target(self, auto=False):
+        if self.engine.is_flow_running() or self.engine.is_driver_recovery_pending():
+            if not auto:
+                self.log('浏览器导入线程运行中，暂不能切换目标窗口。')
+            return
         item = self.window_combo.currentData()
         if not item:
             return
@@ -1579,6 +1830,9 @@ class BrowserFlowWindow(QMainWindow):
             edit.textChanged.connect(lambda *args: self._save_flow_config_silent())
 
     def launch_browser(self):
+        if self.engine.is_flow_running() or self.engine.is_driver_recovery_pending():
+            QMessageBox.information(self, '提示', '浏览器导入线程运行中，暂不能重新启动浏览器。')
+            return
         try:
             self.normalize_start_url_input()
             browser = self._collect_browser_settings(strict=True)
@@ -1603,6 +1857,9 @@ class BrowserFlowWindow(QMainWindow):
         This avoids inadvertently starting a new browser window when the user
         only wants to view the current list of windows.
         """
+        if self.engine.is_flow_running() or self.engine.is_driver_recovery_pending():
+            self.log('浏览器导入线程运行中，已跳过窗口列表刷新。')
+            return
         # If there is no active browser connection, do not start one implicitly.
         if not getattr(self.engine, 'is_connected', lambda: False)():
             # Clear the combo box but leave any previous selection untouched.
@@ -1661,6 +1918,9 @@ class BrowserFlowWindow(QMainWindow):
         self.step_list.setCurrentRow(self.step_list.count() - 1)
 
     def start_element_recording(self):
+        if self.engine.is_flow_running() or self.engine.is_driver_recovery_pending():
+            QMessageBox.information(self, '提示', '浏览器导入线程运行中，暂不能开始自动录制。')
+            return
         if not getattr(self.engine, 'is_connected', lambda: False)():
             QMessageBox.information(self, '提示', '浏览器未连接，请先启动或连接浏览器后再开始自动录制。')
             self.log('浏览器未连接，无法启动自动录制。')
@@ -1861,40 +2121,90 @@ class BrowserFlowWindow(QMainWindow):
         if parent is None or not hasattr(parent, '_last_render_result_text'):
             QMessageBox.information(self, '提示', '未找到主窗口上下文。')
             return
+        if self.task_controller.is_running() or self.engine.is_flow_running() or self.engine.is_driver_recovery_pending():
+            QMessageBox.information(self, '提示', '已有浏览器导入线程正在运行。')
+            return
         try:
+            self._test_input_backup = copy.deepcopy(parent.collect_input_values())
             parent.update_result_text(force=True)
+            input_values = copy.deepcopy(parent._last_input_values)
             payload = {
                 'template_name': parent.current_template_name,
                 'result_text': parent._last_render_result_text,
+                'rendered_fields': parent.build_browser_rendered_fields(input_values),
                 'final_fields': parent._last_final_fields,
-                'input_values': parent._last_input_values,
+                'input_values': input_values,
                 'data_pool': getattr(parent, '_last_data_pool', {}) or {},
             }
-            flow = self.collect_flow(strict=True)
+            flow = copy.deepcopy(self.collect_flow(strict=True))
+            payload = copy.deepcopy(payload)
             start_step = self._parse_test_step_limit(self.test_start_step_edit.text(), '开始步骤')
             end_step = self._parse_test_step_limit(self.test_end_step_edit.text(), '结束步骤')
-            self.engine.execute_flow(
+            if start_step and end_step:
+                self._test_success_message = f'测试导入执行完成。已执行第 {start_step} 步到第 {end_step} 步。'
+            elif start_step:
+                self._test_success_message = f'测试导入执行完成。已从第 {start_step} 步执行到流程结束。'
+            elif end_step:
+                self._test_success_message = f'测试导入执行完成。已从第 1 步执行到第 {end_step} 步。'
+            else:
+                self._test_success_message = '测试导入执行完成。已执行全流程。'
+            if not self.task_controller.start(
                 flow,
                 payload,
-                logger=self.log,
-                alert_handler=self._show_flow_alert,
                 start_step_no=start_step or 1,
                 end_step_no=end_step,
-            )
-            if start_step and end_step:
-                msg = f'测试导入执行完成。已执行第 {start_step} 步到第 {end_step} 步。'
-            elif start_step:
-                msg = f'测试导入执行完成。已从第 {start_step} 步执行到流程结束。'
-            elif end_step:
-                msg = f'测试导入执行完成。已从第 1 步执行到第 {end_step} 步。'
-            else:
-                msg = '测试导入执行完成。已执行全流程。'
-            QMessageBox.information(self, '成功', msg)
+            ):
+                self._test_input_backup = {}
+                QMessageBox.information(self, '提示', '已有浏览器导入线程正在运行。')
         except Exception as e:
-            QMessageBox.critical(self, '错误', f'测试导入失败：{e}')
             self.log(f'测试导入失败：{e}')
+            self._test_input_backup = {}
+            QMessageBox.critical(self, '错误', '测试导入错误。')
+
+    def _on_test_import_succeeded(self):
+        self.log(self._test_success_message or '测试导入执行完成。')
+        if not self._force_closing:
+            QMessageBox.information(self, '成功', '测试导入已完成。')
+
+    def _on_test_import_failed(self, error_text):
+        self.log(f'测试导入失败：{error_text}')
+        if not self._force_closing:
+            QMessageBox.critical(self, '错误', '测试导入错误。')
+
+    def _on_test_import_stopped(self, message):
+        self.log(message or '测试导入已中止。')
+        if not self._force_closing:
+            if '强制' in str(message or ''):
+                QMessageBox.information(self, '提示', '浏览器自动控制已强制结束。')
+            else:
+                QMessageBox.information(self, '提示', '测试导入已中止。')
+
+    def _on_test_running_changed(self, running):
+        if hasattr(self, 'test_btn'):
+            self.test_btn.setEnabled(not running)
+        if not running:
+            self._test_input_backup = {}
+            if self._close_after_task:
+                self._close_after_task = False
+                QTimer.singleShot(0, self.close)
+
+    def stop_test_import(self):
+        return self.task_controller.request_stop()
+
+    def force_terminate_browser_task(self):
+        return self.task_controller.force_terminate()
+
+    def shutdown_browser_task(self, force=False, wait_ms=3000):
+        self._force_closing = True
+        return self.task_controller.shutdown(wait_ms=wait_ms, force=force)
 
     def closeEvent(self, event):
+        if self.task_controller.is_running() and not self._force_closing:
+            self._close_after_task = True
+            self.task_controller.request_stop()
+            self.log('正在中止测试导入，线程结束后将关闭窗口。')
+            event.ignore()
+            return
         try:
             self.record_timer.stop()
             self.engine.stop_element_recording(logger=self.log)
